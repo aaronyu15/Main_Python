@@ -1,3 +1,4 @@
+import os
 import random
 import numpy as np
 import math
@@ -12,13 +13,23 @@ class Base_L:
         self.layer_str = layer_str
         self.synapse = None
 
+    def get_params(self):
+        """Return all trainable parameters and state as dict."""
+        return {
+            "neuron_id": self.neuron_id,
+        }
+
+    def set_params(self, params):
+        """Restore parameters from dict."""
+        self.neuron_id = params["neuron_id"]
+
 class Neuron_L(Base_L):
     def __init__(self, num_neurons, alpha=0.01, mode="linear", layer_str=""):
-        super().__init__(self, num_neurons, layer_str=layer_str)
+        super().__init__(num_neurons=num_neurons, layer_str=layer_str)
         self.prev_layer = None  # previous layer reference
 
         # Per-neuron parameters
-        self.tau = np.ones(num_neurons)                   # each neuron can learn its own tau
+        self.tau = np.full(num_neurons, 1.0)                   # each neuron can learn its own tau
         self.v_th = np.full(num_neurons, 0.8)             # thresholds
         self.neuron_id = np.random.randint(0, 16, size=num_neurons)
 
@@ -45,20 +56,21 @@ class Neuron_L(Base_L):
         if len(n_num) == 0:
             return []
 
-        # Batch weight updates
-        weights_sum = np.sum(self.synapse.synapse_w_matrix[n_num], axis=0)
-
-        # Presynaptic IDs (XOR all together to avoid loop)
-        neuron_id_in = np.bitwise_xor.reduce(self.prev_layer.neuron_id[n_num])
-
         # Time decay
         delta_t = (t - self.t_last) & self.t_bit_mask
         self.t_last[:] = t
+
+        # Batch weight updates
+        weights_sum = np.sum(self.synapse.synapse_w_matrix[n_num], axis=0)
 
         decay_factor = np.exp(-self.tau * delta_t)
         self.membrane_potential_fict = self.membrane_potential_fict * decay_factor + weights_sum
 
         # Physical potential update
+
+        # Presynaptic IDs (XOR all together to avoid loop)
+        neuron_id_in = np.bitwise_xor.reduce(self.prev_layer.neuron_id[n_num])
+
         self.membrane_potential_phys ^= delta_t
         self.membrane_potential_phys ^= (neuron_id_in & self.bit_mask)
         self.membrane_potential_phys &= self.bit_mask
@@ -69,6 +81,22 @@ class Neuron_L(Base_L):
 
         return spiking_neurons.tolist()
 
+    def get_params(self):
+        """Return all trainable parameters and state as dict."""
+        return {
+            "tau": self.tau,
+            "v_th": self.v_th,
+            "neuron_id": self.neuron_id,
+            "membrane_potential_map": self.membrane_potential_map,
+        }
+
+    def set_params(self, params):
+        """Restore parameters from dict."""
+        self.tau = params["tau"]
+        self.v_th = params["v_th"]
+        self.neuron_id = params["neuron_id"]
+        self.membrane_potential_map = params["membrane_potential_map"]
+
 
 class synapse_set:
     def __init__(self, first_layer, second_layer):
@@ -78,9 +106,13 @@ class synapse_set:
         # For now, y = wx
         self.synapse_w_matrix = np.random.rand(self.first_layer_num_neurons, self.second_layer_num_neurons) 
 
-        self.params = {
-            "synapse_w_matrix" : self.synapse_w_matrix
+    def get_params(self):
+        return {
+            "synapse_w_matrix": self.synapse_w_matrix,
         }
+
+    def set_params(self, params):
+        self.synapse_w_matrix = params["synapse_w_matrix"]
         
 class model:
     def __init__(self, layers=[]):
@@ -118,7 +150,7 @@ class model:
         out_spikes = []
 
         # Event based data, no frames!
-        for event in tqdm(x, desc="Processing events"):
+        for event in x:
             # Convert the 34x34 location to a neuron index
             n_num = event['x'] + self.frame_y_size * event['y']
             t = event['t']
@@ -145,3 +177,27 @@ class model:
     def backward(self, target_y, predict_y):
         for i, layer in enumerate(self.layers):
             layer.backward(target_y=target_y[i], predict_y=predict_y[i])
+
+    def save(self, path="../params/model_params.npz"):
+        data = {}
+        # Save each layer
+        for i, layer in enumerate(self.layer_seq):
+            data[f"layer_{i}"] = layer.get_params()
+        # Save synapses
+        for j, syn in enumerate(self.synapse_seq):
+            data[f"synapse_{j}"] = syn.get_params()
+        # Save with numpy
+        np.savez(path, **{k: v for k, v in data.items()})
+        print(f"✅ Model saved to {path}")
+
+    def load(self, path="../params/model_params.npz"):
+        if not os.path.exists(path):
+            print(f"Model file {path} does not exist. Skipping load.")
+            return
+
+        npzfile = np.load(path, allow_pickle=True)
+        for i, layer in enumerate(self.layer_seq):
+            layer.set_params(npzfile[f"layer_{i}"].item())
+        for j, syn in enumerate(self.synapse_seq):
+            syn.set_params(npzfile[f"synapse_{j}"].item())
+        print(f"✅ Model loaded from {path}")
