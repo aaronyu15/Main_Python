@@ -1,15 +1,28 @@
 # model_train.py
-
 import numpy as np
 import tonic
-import tonic.transforms as transforms
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 from tqdm import tqdm
+import argparse
+import logging
 
-from model import model, Neuron_L, Base_L  # import your model definition
+from SNNModel import model # import your model definition
+from SNNLogger import SNNLogger  # for logging training progress
 from NMNIST_Dataset import NMNIST_Dataset  # custom dataset wrapper
+from train_utils import loss_fn, compute_layer_grads, backprop_error
+import utils
 
-def collate_numpy(batch):
+
+def collate_frames(batch):
+    frames, labels = zip(*batch)
+    max_T = max(f.shape[0] for f in frames)
+    P, X, Y = frames[0].shape[1:]
+    batch_frames = np.zeros((len(frames), max_T, P, X, Y), dtype=frames[0].dtype)
+    for i, f in enumerate(frames):
+        batch_frames[i, :f.shape[0]] = f  # pad with zeros
+    return batch_frames, np.array(labels)
+
+def collate_events(batch):
     # batch is list of (events, label)
     events = [b[0] for b in batch]  # keep as list of numpy arrays
     labels = [b[1] for b in batch]
@@ -21,37 +34,67 @@ def load_nmnist(batch_size=1, samples=100, classes={0,1,2}):
     Converts events into numpy arrays with fields x, y, t, p.
     """
 
-    train_dataset = tonic.datasets.NMNIST(save_to="./dataset/nmnist", train=True , transform=None)
-    test_dataset  = tonic.datasets.NMNIST(save_to="./dataset/nmnist", train=False, transform=None)
+    train_dataset = tonic.datasets.NMNIST(save_to="../dataset/nmnist", train=True , transform=None)
+    test_dataset  = tonic.datasets.NMNIST(save_to="../dataset/nmnist", train=False, transform=None)
 
     # Filter dataset to only include specified classes and limit samples
-    train_dataset = NMNIST_Dataset(train_dataset, allowed_classes=classes, max_samples=samples)
-    test_dataset  = NMNIST_Dataset(test_dataset , allowed_classes=classes, max_samples=samples)
+    train_dataset = NMNIST_Dataset(train_dataset, allowed_classes=classes, samples_per_class=samples, use_frames=True, frame_time_window=3000, frame_clip=True)
+    test_dataset  = NMNIST_Dataset(test_dataset , allowed_classes=classes, samples_per_class=samples, use_frames=True, frame_time_window=3000, frame_clip=True)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True , collate_fn=collate_numpy)
-    test_loader  = DataLoader(test_dataset , batch_size=batch_size, shuffle=False, collate_fn=collate_numpy)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True , collate_fn=collate_frames)
+    test_loader  = DataLoader(test_dataset , batch_size=batch_size, shuffle=False, collate_fn=collate_frames)
 
     return train_loader, test_loader
 
 
+def train_one_epoch(nn, train_loader, num_classes=5, lr=0.01):
+    total_loss, correct, total = 0, 0, 0
+    num_layers = len(nn.layers["membrane_potential_map"])
 
-def train_one_epoch(nn_model, train_loader, optimizer=None):
-    """
-    Simple training loop — teacher–student distillation can be added later.
-    """
-    nn_model.train = True
-    all_spikes = []
+    for frames_batch, labels in tqdm(train_loader, desc="Training"):
+        batch_size = len(labels)
 
-    for batch in tqdm(train_loader, desc="Training"):
-        events, labels = batch
-        # events shape: batch_size x N_events
-        for ev, label in zip(events, labels):
-            out_spikes = nn_model(ev)
+        # Accumulate grads for this batch
+        batch_grads = [np.zeros_like(nn.layers["membrane_potential_map"][l]) for l in range(num_layers)]
 
-            # TODO: define a loss
-            # Right now, just record spikes
-            all_spikes.append((out_spikes, label.item()))
-    return all_spikes
+        # ---- Forward pass (all samples at once) ----
+        out_spikes_batch = nn(frames_batch)  # new API
+
+        # ---- Loss + backprop per sample ----
+        for i in range(batch_size):
+            out_spikes = out_spikes_batch[i]
+            spike_counts = np.bincount(out_spikes['n'], minlength=num_classes)
+
+            # Loss
+            continue
+            loss, error_grad_out = loss_fn(spike_counts, labels[i], num_classes)
+            total_loss += loss
+
+            # Prediction
+            pred = np.argmax(spike_counts)
+            correct += (pred == labels[i])
+            total += 1
+
+            # ---- Backpropagation ----
+            next_error = error_grad_out
+
+            for l in range(num_layers-1, -1, -1):  # loop over all layers backwards
+                grads = compute_layer_grads(nn.layers, l, next_error)
+                batch_grads[l] += grads
+
+                if l > 0:
+                    next_error = backprop_error(nn.layers, l, next_error)
+
+        # ---- Apply updates once per batch ----
+        for l in range(num_layers):
+            nn.layers["membrane_potential_map"][l] -= lr * (batch_grads[l] / batch_size)
+
+
+    return total_loss / total, correct / total
+
+
+
+
 
 
 def test_model(nn_model, test_loader):
@@ -74,22 +117,93 @@ def test_model(nn_model, test_loader):
             total += 1
     return correct / total
 
+def get_args():
+    parser = argparse.ArgumentParser(description="Train XOR-based SNN on N-MNIST")
+
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--run_train"  , action="store_true", default=False, help="Whether to run testing")
+    parser.add_argument("--run_test"   , action="store_true", default=False, help="Whether to run testing")
+    parser.add_argument("--run_sample" , action="store_true", default=False, help="Whether to run testing")
+
+    # Dataset args
+    parser.add_argument("--classes", type=int, nargs="+", default=[0,1,2,3,4], help="Which digit classes to use")
+    parser.add_argument("--samples", type=int, default=100, help="Number of per-class samples to use from dataset")
+
+    # Training args
+    parser.add_argument("--epochs", type=int, default=5, help="Number of training epochs")
+    parser.add_argument("--batch-size", type=int, default=4, help="Batch size")
+    parser.add_argument("--lr", type=float, default=0.01, help="Learning rate")
+
+    # Model args
+    parser.add_argument("--save-path", type=str, default="../checkpoints/model.npz", help="Where to save trained model")
+
+    parser.add_argument("--log-file", type=str, default="training.log", help="Where to save trained model")
+    return parser.parse_args()
 
 if __name__ == "__main__":
 
-    nn = model([
-        # Assumed input layer 34x34
-        Base_L(2*34*34),
-        Neuron_L(4*34*34, mode="linear", layer_str="layer_1"),
-        Neuron_L(2*34*34, mode="linear", layer_str="layer_2"),
-        Neuron_L(10, mode="linear", layer_str="output_layer"),
-    ])
+    args = get_args()
 
-    # Load dataset
-    train_loader, test_loader = load_nmnist(batch_size=1)
+    np.random.seed(args.seed)
 
-    # Training loop (dummy for now)
-    for epoch in range(1):
-        spikes = train_one_epoch(nn, train_loader)
-        acc = test_model(nn, test_loader)
-        print(f"Epoch {epoch}: Test Accuracy = {acc:.4f}")
+
+    nn = model(
+        x=34, 
+        y=34, 
+        p=2, 
+        hidden_sizes=(4*34*34, 2*34*34), 
+        out_size=10,
+    )
+
+    logger = SNNLogger(log_level=logging.DEBUG, log_file=args.log_file)
+    logger.record_args(args)
+    logger.setup_monitoring(nn, num_per_layer=5)
+    nn.set_logger(logger)
+
+
+    if args.run_train:
+        logger.info("Starting training...")
+        
+        # Load dataset
+        train_loader, test_loader = load_nmnist(batch_size=args.batch_size, samples=args.samples, classes=set(args.classes))
+
+        # Training loop
+        for epoch in range(args.epochs):
+            avg_loss, train_acc = train_one_epoch(nn, train_loader, num_classes=len(args.classes), lr=args.lr)
+            test_acc = test_model(nn, test_loader)
+            print(f"Epoch {epoch}: Loss={avg_loss:.4f}, Train Acc={train_acc:.4f}, Test Acc={test_acc:.4f}")
+
+        # Save model parameters
+        model.save(path=args.save_path)
+        print(f"Model saved to {args.save_path}")
+
+    elif args.run_test:
+        logger.info("Starting testing...")
+
+        # Load dataset
+        _, test_loader = load_nmnist(batch_size=args.batch_size, samples=args.samples, classes=set(args.classes))
+
+        # Load model parameters
+        nn.load(path=args.save_path)
+
+        # Test
+        test_acc = test_model(nn, test_loader)
+        print(f"Test Accuracy: {test_acc:.4f}")
+
+    elif args.run_sample:
+        # Load model parameters
+        _, test_loader = load_nmnist(batch_size=1, samples=1, classes=set(args.classes))
+
+        nn.load(path=args.save_path)
+
+        # Sample inference
+        sample_events, label =  test_loader.dataset[0]  # get events of first sample
+        out_spikes = nn(sample_events)
+
+        logger.save_activity()
+        logger.plot_membrane_traces("layer_1")
+
+        print("Output spikes:", out_spikes)
+        utils.plot_raster(out_spikes, title=f"Output Spikes for Label {label}")
+
+        

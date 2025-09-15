@@ -1,0 +1,13 @@
+2025-09-15 00:05:38,413 - INFO - Run arguments:
+2025-09-15 00:05:38,413 - INFO -   seed: 42
+2025-09-15 00:05:38,413 - INFO -   run_train: True
+2025-09-15 00:05:38,413 - INFO -   run_test: False
+2025-09-15 00:05:38,413 - INFO -   run_sample: False
+2025-09-15 00:05:38,413 - INFO -   classes: [0, 1, 2, 3, 4]
+2025-09-15 00:05:38,413 - INFO -   samples: 100
+2025-09-15 00:05:38,413 - INFO -   epochs: 5
+2025-09-15 00:05:38,413 - INFO -   batch_size: 4
+2025-09-15 00:05:38,413 - INFO -   lr: 0.01
+2025-09-15 00:05:38,413 - INFO -   save_path: ../checkpoints/model.npz
+2025-09-15 00:05:38,413 - INFO -   log_file: training.log
+2025-09-15 00:05:38,413 - INFO - Starting training...
