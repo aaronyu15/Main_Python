@@ -32,6 +32,8 @@ class SNNLogger:
             self.logger.addHandler(ch)
             self.logger.addHandler(fh)
 
+        self.num_layers = 0
+
         self.tracked = {}       # {layer_name: [neuron_ids]}
         self.records = {}       # {layer_name: {"potentials": [], "spikes": []}}
         self.timestamps = []    # event timestamps
@@ -39,17 +41,25 @@ class SNNLogger:
 
     # ---------------- Setup ----------------
 
-    def setup_monitoring(self, nn, num_per_layer=5):
+    def setup_monitoring(self, nn, choice="random", num_per_layer=5):
         self.tracked.clear()
         self.records.clear()
 
-        #for layer in nn.layers:
-        #    if isinstance(layer, Neuron_L):
-        #        n = len(layer.mem_map)
-        #        ids = random.sample(range(n), min(num_per_layer, n))
-        #        self.tracked[layer.name] = ids
-        #        self.records[layer.name] = {"potentials": [], "spikes": []}
-        #        self.logger.info(f"Monitoring {len(ids)} neurons in {layer.name}: {ids}")
+        self.logger.info(repr(nn))
+
+        self.num_layers = len(nn.layers["tau"])
+
+        for l in range(self.num_layers):
+            num_neurons = nn.layers["num_neurons"][l]
+            if choice == "random":
+                ids = random.sample(range(num_neurons), min(num_per_layer, num_neurons))
+            elif choice == "select":
+                ids = list(range(num_per_layer)) if num_neurons > num_per_layer else list(range(num_neurons))
+
+            self.tracked[nn.layers["name"][l]] = ids
+            self.records[nn.layers["name"][l]] = {"potentials": [], "spikes": []}
+            self.logger.info(f"Monitoring {len(ids)} neurons in {nn.layers["name"][l]}: {ids}")
+
 
     # ---------------- Recording ----------------
     def info(self, msg):
@@ -69,33 +79,32 @@ class SNNLogger:
         for k, v in vars(args).items():
             self.logger.info(f"  {k}: {v}")
 
-    #def record_state(self, nn, event_t):
-    #    """
-    #    Record neuron states after processing an event at timestamp event_t.
-    #    """
-    #    self.timestamps.append(event_t)
+    def record_state(self, nn, event_t):
+        """
+        Record neuron states after processing an event at timestamp event_t.
+        """
+        self.timestamps.append(event_t)
     
-    #    for layer in nn.layer_seq:
-    #        if isinstance(layer, Neuron_L):
-    #            ids = self.tracked.get(layer.layer_str, [])
-    #            if not ids:
-    #                continue
-    #            
-    #            pots = []
-    #            spks = []
+        for l in range(self.num_layers):
+            ids = self.tracked.get(nn.layers["name"][l], [])
+            if not ids:
+                continue
+                
+            pots = []
+            spks = []
     
-    #            for i in ids:
-    #                # use the same indexing as spike check
-    #                phys_idx = layer.mem_phys[i]
-    #                pot_val = layer.mem_map[i, phys_idx]
-    #                pots.append(float(pot_val))
+            for i in ids:
+                # use the same indexing as spike check
+                phys_idx = nn.layers["membrane_potential_phys"][l][i]
+                pot_val  = nn.layers["membrane_potential_map"][l][i, phys_idx]
+                pots.append(float(pot_val))
     
-    #                # a neuron spikes if potential >= threshold
-    #                spk_val = 1 if pot_val >= layer.v_th[i] else 0
-    #                spks.append(spk_val)
+                # a neuron spikes if potential >= threshold
+                spk_val = 1 if pot_val >= nn.layers["v_th"][l][i] else 0
+                spks.append(spk_val)
     
-    #            self.records[layer.name]["potentials"].append(pots)
-    #            self.records[layer.name]["spikes"].append(spks)
+            self.records[nn.layers["name"][l]]["potentials"].append(pots)
+            self.records[nn.layers["name"][l]]["spikes"].append(spks)
 
 
     def summarize_epoch(self, epoch):
