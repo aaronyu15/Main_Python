@@ -1,14 +1,18 @@
-2025-09-22 12:19:23,298 - INFO - Run arguments:
-2025-09-22 12:19:23,298 - INFO -   seed: 42
-2025-09-22 12:19:23,298 - INFO -   run_train: True
-2025-09-22 12:19:23,298 - INFO -   run_test: False
-2025-09-22 12:19:23,298 - INFO -   run_sample: False
-2025-09-22 12:19:23,298 - INFO -   classes: [0, 1, 2, 3, 4]
-2025-09-22 12:19:23,298 - INFO -   samples: 100
-2025-09-22 12:19:23,299 - INFO -   epochs: 5
-2025-09-22 12:19:23,299 - INFO -   batch_size: 100
-2025-09-22 12:19:23,299 - INFO -   lr: 0.01
-2025-09-22 12:19:23,299 - INFO -   save_path: ../checkpoints/model.npz
-2025-09-22 12:19:23,299 - INFO -   log_file: training.log
-2025-09-22 12:19:23,299 - INFO -   debug: False
-2025-09-22 12:19:23,299 - INFO - Starting training...
+2025-09-30 15:32:42,337 - INFO - Run arguments:
+2025-09-30 15:32:42,337 - INFO -   seed: 42
+2025-09-30 15:32:42,337 - INFO -   run_train: False
+2025-09-30 15:32:42,337 - INFO -   run_test: False
+2025-09-30 15:32:42,337 - INFO -   run_sample: False
+2025-09-30 15:32:42,337 - INFO -   classes: [0, 1, 2, 3, 4]
+2025-09-30 15:32:42,337 - INFO -   samples: 100
+2025-09-30 15:32:42,337 - INFO -   epochs: 5
+2025-09-30 15:32:42,337 - INFO -   batch_size: 100
+2025-09-30 15:32:42,337 - INFO -   lr: 0.01
+2025-09-30 15:32:42,337 - INFO -   save_path: ../checkpoints/model.npz
+2025-09-30 15:32:42,337 - INFO -   log_file: training.log
+2025-09-30 15:32:42,337 - INFO -   debug: False
+2025-09-30 15:32:42,337 - INFO -   inspect: True
+2025-09-30 15:32:42,337 - INFO -   param: v_th
+2025-09-30 15:32:42,337 - INFO -   layer_id: None
+2025-09-30 15:32:42,337 - INFO -   neuron_id: None
+2025-09-30 15:32:42,337 - INFO - Inspecting parameters...

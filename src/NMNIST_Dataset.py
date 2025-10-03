@@ -129,5 +129,5 @@ if __name__ == "__main__":
     print(f"Shape of frames (T, P, X, Y): {frames.shape}")
     print(f"Largest time in dataset: {dataset.get_largest_time()}")
 
-    play_frames(frames, single_frame=True, frame_idx=1, clip_frames=False)
+    play_frames(frames, single_frame=False, frame_idx=1, clip_frames=False)
     plot_frame_histogram(frames, bins=50, title="Frame Value Histogram")

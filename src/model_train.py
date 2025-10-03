@@ -81,9 +81,11 @@ def train_one_epoch(nn, train_loader, num_classes=5, lr=0.01, epoch_num=0, debug
         for l in reversed(range(num_layers)):  # loop over all layers backwards
             # presynaptic activations: activations[l-1]
             if l == 0:
-                batch_activations = frames_batch.reshape(batch_size, -1)  # flatten raw input
+                batch_activations = frames_batch.sum(axis=1).reshape(100, -1)  # flatten raw input
             else:
-                batch_activations = activations[l-1]
+                num_neurons = len(nn.layers["tau"][l-1])
+                batch_activations = activations[l-1][:, :num_neurons]
+
 
             grads = compute_layer_grads_batch(grads, nn, l, next_error_batch, batch_activations)
 
@@ -101,28 +103,29 @@ def train_one_epoch(nn, train_loader, num_classes=5, lr=0.01, epoch_num=0, debug
 
 
 
-
-
-
-def test_model(nn_model, test_loader):
-    nn_model.eval = True
+def test_model(nn, test_loader, num_classes):
     correct = 0
     total = 0
-    for batch in tqdm(test_loader, desc="Testing"):
-        events, labels = batch
-        for ev, label in zip(events, labels):
-            out_spikes = nn_model(ev)
 
-            # Example: classify by most active neuron in last layer
-            if len(out_spikes) > 0:
-                pred = np.bincount(out_spikes["n"]).argmax()
-            else:
-                pred = -1  # no spike = failure
+    for frames_batch, labels in tqdm(test_loader, desc="Testing"):
+        # Forward pass
+        out_spikes_batch = nn(frames_batch, return_intermediates=False)
 
-            if pred == label.item():
-                correct += 1
-            total += 1
+        # Convert spikes to spike counts
+        batch_size = len(labels)
+        spike_counts_batch = np.zeros((batch_size, num_classes), dtype=np.int64)
+
+        for i, out_spikes in enumerate(out_spikes_batch):
+            if out_spikes.size > 0:
+                spike_counts_batch[i] = np.bincount(out_spikes["n"], minlength=num_classes)
+
+        # Predictions
+        preds = np.argmax(spike_counts_batch, axis=1)
+        correct += np.sum(preds == labels)
+        total += batch_size
+
     return correct / total
+
 
 def get_args():
     parser = argparse.ArgumentParser(description="Train XOR-based SNN on N-MNIST")
@@ -146,6 +149,12 @@ def get_args():
 
     parser.add_argument("--log-file", type=str, default="training.log", help="Where to save trained model")
     parser.add_argument("--debug"   , action="store_true", default=False, help="Whether to run testing")
+
+    parser.add_argument("--inspect"   , action="store_true", default=False, help="Whether to run testing")
+    parser.add_argument("--param"   , type=str,  default=None, help="Whether to run testing")
+
+    parser.add_argument("--layer_id"   , type=int,  default=None, help="Whether to run testing")
+    parser.add_argument("--neuron_id"   , type=int,  default=None, help="Whether to run testing")
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -165,7 +174,7 @@ if __name__ == "__main__":
         y=34, 
         p=2, 
         hidden_sizes=hidden_sizes, 
-        out_size=10,
+        out_size=5,
     )
 
     logger = SNNLogger(log_level=logging.DEBUG, log_file=args.log_file)
@@ -185,13 +194,12 @@ if __name__ == "__main__":
         # Training loop
         for epoch in range(args.epochs):
             avg_loss, train_acc = train_one_epoch(nn, train_loader, num_classes=len(args.classes), lr=args.lr, epoch_num=epoch, debug=args.debug, logger=logger)
-            test_acc = test_model(nn, test_loader)
+            test_acc = test_model(nn, test_loader, num_classes=len(args.classes))
 
-            logger.info(f"Epoch [{epoch}]: Loss={avg_loss:.4f}, Train Acc={train_acc:.4f}, Test Acc{test_acc:.4f}")
+            logger.info(f"Epoch [{epoch}]: Loss={avg_loss:.4f}, Train Acc={train_acc:.4f}, Test Acc={test_acc:.4f}")
 
         # Save model parameters
-        model.save(path=args.save_path)
-        print(f"Model saved to {args.save_path}")
+        nn.save(path=args.save_path)
 
     elif args.run_test:
         logger.info("Starting testing...")
@@ -211,7 +219,7 @@ if __name__ == "__main__":
         # Load model parameters
         _, test_loader = load_nmnist(batch_size=1, samples=1, classes=set(args.classes))
 
-        nn.load(path=args.save_path)
+        #nn.load(path=args.save_path)
 
         # Sample inference
         sample = next(iter(test_loader))
@@ -228,5 +236,16 @@ if __name__ == "__main__":
 
         print("Output spikes:", out_spikes[0])
         utils.plot_raster(out_spikes[0], title=f"Output Spikes for Label {label}")
+
+    elif args.inspect:
+        logger.info("Inspecting parameters...")
+
+        # Load model parameters
+        #nn.load(path=args.save_path)
+
+        if args.param:
+            nn.plot_parameters(args.param)
+        elif args.layer_id is not None and args.neuron_id is not None:
+            nn.plot_membrane_potential_map(args.layer_id, args.neuron_id)
 
         

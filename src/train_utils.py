@@ -76,8 +76,8 @@ def compute_layer_grads_batch(grads, nn, l, error_batch, batch_activations):
     # ---- gradients wrt synapse weights ----
     # dL/dW = X^T @ error, shape (N_prev, N_curr)
     grads["synapse_w_matrix"][l] += batch_activations.T @ error_batch
-    grads["tau"][l] += error_batch
-    grads["v_th"][l][i] += error_batch
+    grads["tau"][l] += error_batch.sum(axis=0)
+    grads["v_th"][l] += error_batch.sum(axis=0)
 
 
     return grads
@@ -104,17 +104,17 @@ def update_layer_params(grads, nn, lr=0.01, batch_size=1):
     for l in range(num_layers):
         # Update synapse weights
         nn.layers["synapse_w_matrix"][l] -= (
-            lr * grads["synapse_w_matrix"][l] / batch_size
+            lr["synapse_w_matrix"] * grads["synapse_w_matrix"][l] / batch_size
         ).astype(np.float32)
 
         # Update tau
         nn.layers["tau"][l] += (
-            lr * grads["tau"][l] / batch_size
+            lr["tau"] * grads["tau"][l] / batch_size
         ).astype(np.float32)
 
         # Update v_th
         nn.layers["v_th"][l] += (
-            lr * grads["v_th"][l] / batch_size
+            lr["v_th"] * grads["v_th"][l] / batch_size
         ).astype(np.float32)
 
         nn.layers["tau"][l] = np.clip(nn.layers["tau"][l], 1e-3, 10.0)

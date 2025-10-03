@@ -86,7 +86,8 @@ class SNNLogger:
         self.timestamps.append(event_t)
     
         for l in range(self.num_layers):
-            ids = self.tracked.get(nn.layers["name"][l], [])
+            layer_name = str(nn.layers["name"][l])
+            ids = self.tracked.get(layer_name, [])
             if not ids:
                 continue
                 
@@ -103,8 +104,8 @@ class SNNLogger:
                 spk_val = 1 if pot_val >= nn.layers["v_th"][l][i] else 0
                 spks.append(spk_val)
     
-            self.records[nn.layers["name"][l]]["potentials"].append(pots)
-            self.records[nn.layers["name"][l]]["spikes"].append(spks)
+            self.records[layer_name]["potentials"].append(pots)
+            self.records[layer_name]["spikes"].append(spks)
 
 
     def summarize_epoch(self, epoch):
