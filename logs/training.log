@@ -1,18 +1,35 @@
-2025-09-30 15:32:42,337 - INFO - Run arguments:
-2025-09-30 15:32:42,337 - INFO -   seed: 42
-2025-09-30 15:32:42,337 - INFO -   run_train: False
-2025-09-30 15:32:42,337 - INFO -   run_test: False
-2025-09-30 15:32:42,337 - INFO -   run_sample: False
-2025-09-30 15:32:42,337 - INFO -   classes: [0, 1, 2, 3, 4]
-2025-09-30 15:32:42,337 - INFO -   samples: 100
-2025-09-30 15:32:42,337 - INFO -   epochs: 5
-2025-09-30 15:32:42,337 - INFO -   batch_size: 100
-2025-09-30 15:32:42,337 - INFO -   lr: 0.01
-2025-09-30 15:32:42,337 - INFO -   save_path: ../checkpoints/model.npz
-2025-09-30 15:32:42,337 - INFO -   log_file: training.log
-2025-09-30 15:32:42,337 - INFO -   debug: False
-2025-09-30 15:32:42,337 - INFO -   inspect: True
-2025-09-30 15:32:42,337 - INFO -   param: v_th
-2025-09-30 15:32:42,337 - INFO -   layer_id: None
-2025-09-30 15:32:42,337 - INFO -   neuron_id: None
-2025-09-30 15:32:42,337 - INFO - Inspecting parameters...
+2025-10-18 16:27:26,837 - INFO - Run arguments:
+2025-10-18 16:27:26,838 - INFO -   seed: 42
+2025-10-18 16:27:26,838 - INFO -   run_train: False
+2025-10-18 16:27:26,838 - INFO -   run_test: False
+2025-10-18 16:27:26,838 - INFO -   run_sample: True
+2025-10-18 16:27:26,838 - INFO -   classes: [0, 1, 2, 3, 4]
+2025-10-18 16:27:26,838 - INFO -   samples: 100
+2025-10-18 16:27:26,838 - INFO -   epochs: 5
+2025-10-18 16:27:26,838 - INFO -   batch_size: 100
+2025-10-18 16:27:26,838 - INFO -   lr: 0.01
+2025-10-18 16:27:26,838 - INFO -   save_path: ../checkpoints/model.npz
+2025-10-18 16:27:26,838 - INFO -   log_file: training.log
+2025-10-18 16:27:26,838 - INFO -   debug: True
+2025-10-18 16:27:26,838 - INFO -   inspect: False
+2025-10-18 16:27:26,838 - INFO -   param: None
+2025-10-18 16:27:26,838 - INFO -   layer_id: None
+2025-10-18 16:27:26,838 - INFO -   neuron_id: None
+2025-10-18 16:27:26,838 - INFO - SNNModel_Torch(
+  Input: 2312
+  Hidden: [4624, 2312]
+  Output: 5
+  Layers:
+    Input: 2312 neurons
+    Layer0: 4624 neurons
+    Layer1: 2312 neurons
+    Layer2: 5 neurons
+)
+2025-10-18 16:27:26,989 - INFO - Monitoring 1 neurons in Layer0: [0]
+2025-10-18 16:27:27,108 - INFO - Monitoring 1 neurons in Layer1: [0]
+2025-10-18 16:27:27,226 - INFO - Monitoring 1 neurons in Layer2: [0]
+2025-10-18 16:27:27,226 - INFO - Running a sample...
+2025-10-18 16:27:31,802 - INFO - Sample true label: [0]
+2025-10-18 16:27:31,802 - INFO - Sample number of timesteps: 101
+2025-10-18 16:27:31,802 - INFO - Sample shape: (1, 101, 2, 34, 34)
+2025-10-18 16:28:06,826 - INFO - Saved activity traces to ../logs/

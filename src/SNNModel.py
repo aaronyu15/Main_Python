@@ -1,539 +1,420 @@
+# SNNModel_Torch_Batched.py
 import os
+from typing import List, Tuple, Optional, Dict, Any
+
 import numpy as np
-from tqdm import tqdm
+import torch
+import torch.nn as nn
 import matplotlib.pyplot as plt
-from numba import njit, prange
-from numba.typed import List
 from matplotlib.ticker import ScalarFormatter
 
-# Numba-friendly “pack” = tuple of arrays & scalars.
-# Order (and dtypes) matter and must be consistent everywhere:
-# (tau, v_th, neuron_id, t_last, membrane_potential_fict, membrane_potential_phys,
-#  membrane_potential_map, synapse_w_matrix, bit_mask, t_bit_mask)
 
-def build_layer_arrays(N_prev, N):
-    tau         = np.random.random(N).astype(np.float32)         # Trainable
-    v_th        = np.random.random(N).astype(np.float32)         # Trainable
-    neuron_id   = np.random.randint(0, 16, size=N, dtype=np.int64) # Trainable
+def _xor_reduce_dim(x: torch.Tensor, dim: int) -> torch.Tensor:
+    """
+    XOR-reduce along a given dim (tree reduction).
+    Works for int64 tensors on CPU/GPU.
+    """
+    if x.size(dim) == 0:
+        shape = list(x.shape)
+        shape.pop(dim)
+        return torch.zeros(shape, dtype=torch.int64, device=x.device)
 
-    membrane_potential_fict = np.zeros(N, dtype=np.float32)
-    membrane_potential_phys = np.zeros(N, dtype=np.int64)
+    t = x
+    while t.size(dim) > 1:
+        n = t.size(dim)
+        if n % 2 == 1:
+            pad_shape = list(t.shape)
+            pad_shape[dim] = 1
+            t = torch.cat(
+                [t, torch.zeros(pad_shape, dtype=t.dtype, device=t.device)], dim=dim
+            )
+            n += 1
+        t = torch.bitwise_xor(t.narrow(dim, 0, n // 2), t.narrow(dim, n // 2, n // 2))
+    return t.squeeze(dim)
 
-    membrane_potential_map  = 1.0 / (1.0 + np.exp(-(np.random.random((N, 16)).astype(np.float32) * 5.0))) #Trainable
-    synapse_w_matrix        = np.random.random((N_prev, N)).astype(np.float32) #Trainable
 
-    return (tau, 
-            v_th, 
-            neuron_id, 
-            membrane_potential_fict, 
-            membrane_potential_phys,
-            membrane_potential_map, 
-            synapse_w_matrix,
+class SNNLayer(nn.Module):
+    """
+    Batched spiking layer with XOR/parity-based physical membrane updates and
+    a trainable membrane-potential LUT (mem_map).
+    Maintains per-batch state: mem_fict[B, N_out], mem_phys[B, N_out], t_last[B].
+    """
+
+    def __init__(
+        self,
+        n_in: int,
+        n_out: int,
+        mem_pot_bits: int = 4,  # -> mem_pot_max = 2**bits
+        t_bits: int = 4,  # -> timestep modulo 2**bits
+    ):
+        super().__init__()
+        self.n_in = n_in
+        self.n_out = n_out
+
+        self.mem_pot_bits = mem_pot_bits
+        self.t_bits = t_bits
+        self.mem_pot_max = 1 << mem_pot_bits
+        self.m_bit_mask = (1 << mem_pot_bits) - 1
+        self.t_bit_mask = (1 << t_bits) - 1
+
+        # ---- Trainable parameters ----
+        self.tau = nn.Parameter(torch.rand(n_out, dtype=torch.float32))
+        self.v_th = nn.Parameter(torch.rand(n_out, dtype=torch.float32))
+
+        # Per-neuron static IDs (buffer)
+        neuron_id_init = torch.randint(0, self.mem_pot_max, (n_out,), dtype=torch.int64)
+        self.register_buffer("neuron_id", neuron_id_init)
+
+        # Trainable membrane potential map (N_out, mem_pot_max)
+        self.mem_map = nn.Parameter(
+            torch.sigmoid(torch.randn(n_out, self.mem_pot_max, dtype=torch.float32))
+        )
+
+        # Trainable synapse weights (N_in, N_out)
+        self.syn_w = nn.Parameter(torch.rand(n_in, n_out, dtype=torch.float32))
+
+        # ---- Stateful buffers (will be resized to (B, *) at runtime) ----
+        self.register_buffer("mem_fict", torch.zeros(1, n_out, dtype=torch.float32))
+        self.register_buffer("mem_phys", torch.zeros(1, n_out, dtype=torch.int64))
+        self.register_buffer("t_last", torch.zeros(1, dtype=torch.int64))
+
+    def reset_state(self, batch_size: int):
+        device = self.mem_fict.device
+        self.mem_fict = torch.zeros(
+            batch_size, self.n_out, dtype=torch.float32, device=device
+        )
+        self.mem_phys = torch.zeros(
+            batch_size, self.n_out, dtype=torch.int64, device=device
+        )
+        self.t_last = torch.zeros(batch_size, dtype=torch.int64, device=device)
+
+    @torch.no_grad()
+    def step(
+        self,
+        active_mask: torch.Tensor,  # (B, N_in) boolean or 0/1 float/int
+        t: int,
+        prev_neuron_id: torch.Tensor,  # (N_in,) int64 IDs
+        accumulate_lut_delta: Optional[torch.Tensor] = None,  # (N_out, mem_pot_max)
+        alpha: float = 0.0,
+    ) -> torch.Tensor:
+        """
+        Single-timestep update for this layer across the whole batch.
+        Returns active_next_mask: (B, N_out) boolean, neurons that spiked at this step.
+        Optionally accumulates per-bucket LUT deltas into 'accumulate_lut_delta'.
+        """
+        B = active_mask.shape[0]
+        device = self.mem_fict.device
+
+        # ---- time update ----
+        delta_t = (int(t) - self.t_last) & self.t_bit_mask  # (B,)
+        self.t_last[:] = int(t)
+
+        # ---- input accumulation ----
+        # weights_sum = active_rows_sum @ syn_w  -> (B, N_out)
+        weights_sum = active_mask.to(torch.float32) @ self.syn_w  # (B, N_out)
+
+        # ---- fictitious decay/update ----
+        # broadcast decay: (B,1) * (1,N_out)
+        decay = torch.exp(
+            -self.tau.unsqueeze(0) * delta_t.unsqueeze(1).to(torch.float32)
+        )
+        self.mem_fict = self.mem_fict * decay + weights_sum
+
+        # ---- physical XOR update ----
+        # Mask prev IDs per batch, XOR-reduce across N_in
+        masked_ids = torch.where(
+            active_mask.bool(),
+            prev_neuron_id.unsqueeze(0).expand(B, -1),
+            torch.zeros(1, self.n_in, dtype=torch.int64, device=device),
+        )
+        acc = _xor_reduce_dim(masked_ids, dim=1)  # (B,)
+
+        self.mem_phys ^= delta_t.unsqueeze(1)  # (B, N_out)
+        self.mem_phys ^= acc.unsqueeze(1) & self.m_bit_mask
+        self.mem_phys &= self.m_bit_mask
+
+        # ---- spike check ----
+        # v_map_vals[b, i] = mem_map[i, mem_phys[b, i]]
+        mem_map_exp = self.mem_map.unsqueeze(0).expand(B, -1, -1)  # (B, N_out, K)
+        v_map_vals = torch.gather(mem_map_exp, 2, self.mem_phys.unsqueeze(-1)).squeeze(
+            -1
+        )  # (B, N_out)
+        active_next_mask = v_map_vals >= self.v_th.unsqueeze(0)  # (B, N_out)
+
+        # ---- accumulate LUT delta (optional) ----
+        if accumulate_lut_delta is not None and alpha != 0.0:
+            buckets = self.mem_phys  # (B, N_out)
+            current_vals = v_map_vals  # (B, N_out)
+            delta = alpha * (buckets.to(torch.float32) - current_vals)  # (B, N_out)
+
+            rows = (
+                torch.arange(self.n_out, device=device).unsqueeze(0).expand(B, -1)
+            )  # (B, N_out)
+            flat_rows = rows.reshape(-1)  # (B*N_out,)
+            flat_cols = buckets.reshape(-1)  # (B*N_out,)
+            flat_vals = delta.reshape(-1)  # (B*N_out,)
+
+            accumulate_lut_delta.index_put_(
+                (flat_rows, flat_cols), flat_vals, accumulate=True
             )
 
+        return active_next_mask
 
-def build_layers(sizes, mem_pot_max=16):
+
+class SNNModel(nn.Module):
     """
-    sizes: list like [input_size, h1, h2, ..., out_size]
-    returns: dict of numba.typed.Lists for each field + prev_neuron_id_list
+    Torch-native SNNModel (batched) that mirrors the original Numba logic but processes
+    the ENTIRE BATCH in parallel on GPU.
+    Still exposes a 'layers' property compatible with SNNLogger (uses batch 0 view).
     """
-    name_list  = List() 
-    num_list  = List() 
 
-    tau_list  = List() 
-    v_th_list = List()
-    neuron_id_list = List()
-
-    membrane_potential_fict_list = List()
-    membrane_potential_phys_list = List()
-    membrane_potential_map_list  = List()
-    synapse_w_matrix_list        = List()
-
-    prev_neuron_id_list = List()
-
-    # synthetic input neuron IDs for layer 0 
-    input_neuron_id = np.random.randint(0, mem_pot_max, size=sizes[0], dtype=np.int64)
-
-    for li in range(1, len(sizes)):
-        N_prev, N = sizes[li-1], sizes[li]
-
-        (tau, 
-         v_th, 
-         neuron_id, 
-         membrane_potential_fict, 
-         membrane_potential_phys,
-         membrane_potential_map, 
-         synapse_w_matrix,
-         ) = build_layer_arrays(N_prev, N)
-
-        name_list.append(f"Layer{li-1}")
-        num_list.append(N)
-
-        tau_list.append(tau)
-        v_th_list.append(v_th)
-        neuron_id_list.append(neuron_id)
-        membrane_potential_fict_list.append(membrane_potential_fict)
-        membrane_potential_phys_list.append(membrane_potential_phys)
-        membrane_potential_map_list.append(membrane_potential_map)
-        synapse_w_matrix_list.append(synapse_w_matrix)
-
-        # prev neuron ids
-        if li == 1:
-            prev_neuron_id_list.append(input_neuron_id)
-        else:
-            prev_neuron_id_list.append(neuron_id_list[li-2])  # previous layer's neuron_id
-
-    return {
-        "name": name_list,
-        "num_neurons": num_list,
-        "tau": tau_list,
-        "v_th": v_th_list,
-        "neuron_id": neuron_id_list,
-        "membrane_potential_fict": membrane_potential_fict_list,
-        "membrane_potential_phys": membrane_potential_phys_list,
-        "membrane_potential_map": membrane_potential_map_list,
-        "synapse_w_matrix": synapse_w_matrix_list,
-        "prev_neuron_id": prev_neuron_id_list,
-    }
-
-
-@njit(cache=True)
-def layer_step(
-    active_prev: np.ndarray,
-    t: np.int64,
-    prev_neuron_id: np.ndarray,
-    tau: np.ndarray,                      # float32 [N]
-    v_th: np.ndarray,                     # float32 [N]
-    t_last: np.int64,                     # int64 scalar
-    membrane_potential_fict: np.ndarray,  # float32 [N]  (updated in-place)
-    membrane_potential_phys: np.ndarray,  # int64   [N]  (updated in-place)
-    membrane_potential_map: np.ndarray,   # float32 [N,16]
-    synapse_w_matrix: np.ndarray,         # float32 [N_prev, N]
-    m_bit_mask: np.int64,
-    t_bit_mask: np.int64
-):
-
-    # ---- time update ----
-    delta_t = (t - t_last) & t_bit_mask
-    t_last = t
-
-    # ---- input accumulation (ALWAYS an array) ----
-    N = synapse_w_matrix.shape[1]
-    weights_sum = np.zeros(N, dtype=np.float32)  # ensure array(float32, 1d)
-    if active_prev.size > 0:
-        # sum over selected presyn rows -> (N,)
-        weights_sum += synapse_w_matrix[active_prev, :].sum(axis=0)
-
-    # ---- fictitious decay/update (IN-PLACE) ----
-    # force float32 math to avoid implicit float64
-    decay = np.exp(-tau * delta_t).astype(np.float32)
-    membrane_potential_fict[:] = membrane_potential_fict * decay + weights_sum
-
-    # ---- physical XOR update (IN-PLACE) ----
-    if active_prev.size > 0:
-        # xor-reduce prev IDs at indices
-        acc = np.int64(0)
-        ids = prev_neuron_id[active_prev]
-        for i in range(ids.size):
-            acc ^= ids[i]
-        neuron_id_in = acc
-    else:
-        neuron_id_in = np.int64(0)
-
-    membrane_potential_phys ^= delta_t
-    membrane_potential_phys ^= (neuron_id_in & m_bit_mask)
-    membrane_potential_phys &= m_bit_mask
-
-    # ---- spike check ----
-    # first count
-    cnt = 0
-    for i in range(membrane_potential_phys.size):
-        if membrane_potential_map[i, membrane_potential_phys[i]] >= v_th[i]:
-            cnt += 1
-    active_next = np.empty(cnt, dtype=np.int64)
-
-    j = 0
-    for i in range(membrane_potential_phys.size):
-        if membrane_potential_map[i, membrane_potential_phys[i]] >= v_th[i]:
-            active_next[j] = i
-            j += 1
-
-    # return only the scalar t_last and the spike indices; arrays were updated in-place
-    return t_last, active_next
-
-
-
-@njit(parallel=True, cache=False)
-def forward_batch_numba(
-    frames_batch,                 # (B, T, P, X, Y)
-    X: int, Y: int, P: int,
-    # per-layer arrays (lists of arrays with length = num_layers)
-    tau_list,                           # Training parameter
-    v_th_list,                          # Training parameter 
-    membrane_potential_fict_list,       # Local state (mutable)
-    membrane_potential_phys_list,       # Local state (mutable)
-    membrane_potential_map_list,        # Training parameter
-    synapse_w_matrix_list,              # Training parameter
-    prev_neuron_id_list,                # Training parameter
-    m_bit_mask: np.int64,          # 2^4 - 1
-    t_bit_mask: np.int64,           # 2^4 - 1
-    max_spikes_per_sample: int,
-    max_neurons: int,
-    return_intermediates: bool,
-):
-
-    alpha = 0.001
-
-    num_layers = len(tau_list)
-    B, T, P_, X_, Y_ = frames_batch.shape
-    spike_neurons = np.full((B, max_spikes_per_sample), -1, dtype=np.int64)
-    spike_times   = np.zeros((B, max_spikes_per_sample), dtype=np.int64)
-    spike_counts  = np.zeros(B, dtype=np.int64)
-
-    activations = np.zeros((num_layers, B, max_neurons), dtype=np.int64)
-
-    delta_mem_map_batch = np.zeros((B, num_layers, max_neurons, 16), dtype=np.float32)
-
-    local_membrane_potential_fict = np.zeros((B, num_layers, max_neurons), dtype=np.float32)
-    local_membrane_potential_phys = np.zeros((B, num_layers, max_neurons), dtype=np.int64)
-    local_t_last = np.zeros((B, num_layers), dtype=np.int64)
-
-    for b in prange(B):
-        write_idx = 0
-
-        # ---- process timesteps ----
-        for t in range(T):
-            frame_t = frames_batch[b, t]
-            if not np.any(frame_t):
-                continue
-
-            active_p, active_x, active_y = np.where(frame_t > 0)
-            active_neurons = (active_x + Y * active_y + (X * Y) * active_p).astype(np.int64)
-
-            # push through layers; mutate only local copies
-            for l in range(num_layers):
-                n = tau_list[l].shape[0]
-
-                # view into the thread-local slice
-                membrane_potential_fict_view = local_membrane_potential_fict[b, l, :n]
-                membrane_potential_phys_view = local_membrane_potential_phys[b, l, :n]
-                local_t_last_view = local_t_last[b, l]
-
-                t_last_new, active_next = layer_step(
-                    active_neurons, 
-                    np.int64(t),
-                    prev_neuron_id_list[l],
-                    tau_list[l], 
-                    v_th_list[l], 
-                    local_t_last_view,
-                    membrane_potential_fict_view,
-                    membrane_potential_phys_view,
-                    membrane_potential_map_list[l],
-                    synapse_w_matrix_list[l],
-                    m_bit_mask, 
-                    t_bit_mask
-                )
-
-                local_t_last[b, l] = t_last_new
-                active_neurons = active_next
-
-                if active_neurons.size == 0:
-                    break
-
-                if return_intermediates:
-                    for k in range(active_neurons.size):
-                        idx = active_neurons[k]
-                        if idx < max_neurons:
-                            activations[l, b, idx] += 1
-
-                # ---- accumulate LUT deltas in thread-local buffer (NO WRITE to shared LUT) ----
-                # For all neurons i in this layer, at this time step, push:
-                #   d = alpha * (bucket - mem_map[i, bucket])
-                # into delta_mem_map_batch[b, l, i, bucket]
-                lut = membrane_potential_map_list[l]  # read-only
-                for i in range(n):
-                    bucket = membrane_potential_phys_view[i]
-                    # guard in case bucket out of [0,15]
-                    if 0 <= bucket < 16:
-                        # compute delta relative to current LUT (read-only)
-                        d = alpha * (np.float32(bucket) - lut[i, bucket])
-                        delta_mem_map_batch[b, l, i, bucket] += d
-
-
-            # write final-layer spikes into preallocated buffers
-            num_output_spikes = active_neurons.size
-            can_write = max_spikes_per_sample - write_idx
-            if can_write > 0:
-                num_to_write = num_output_spikes if num_output_spikes <= can_write else can_write
-
-                spike_neurons[b, write_idx:write_idx + num_to_write] = active_neurons[:num_to_write]
-
-                for j in range(num_to_write):
-                    spike_times[b, write_idx + j] = t
-                write_idx += num_to_write
-
-        spike_counts[b] = write_idx
-
-    return spike_neurons, spike_times, spike_counts, activations, delta_mem_map_batch
-
-# ---------------------- Core driver ----------------------
-def forward_batch_driver(model, frames_batch, logger=None, return_intermediates=False):
-    """
-    Debug-mode forward driver. Mirrors forward_batch_numba exactly,
-    but runs in pure Python and can log neuron states with `logger`.
-    """
-    alpha = 0.01
-    B, T, P, X, Y = frames_batch.shape
-    num_layers = len(model.layers["tau"])
-    max_neurons = max(arr.shape[0] for arr in model.layers["tau"])
-    out_size = model.layer_sizes[-1]
-    max_spikes_per_sample = int(T * out_size)
-
-    dt_dtype = model.dt_dtype
-    outputs = []
-    activations = [np.zeros((B, arr.shape[0]), dtype=np.int64) for arr in model.layers["tau"]] \
-                  if return_intermediates else None
-
-    # same buffers as in numba kernel
-    spike_neurons = np.full((B, max_spikes_per_sample), -1, dtype=np.int64)
-    spike_times   = np.zeros((B, max_spikes_per_sample), dtype=np.int64)
-    spike_counts  = np.zeros(B, dtype=np.int64)
-    delta_mem_map_batch = np.zeros((B, num_layers, max_neurons, 16), dtype=np.float32)
-
-    local_membrane_potential_fict = np.zeros((B, num_layers, max_neurons), dtype=np.float32)
-    local_membrane_potential_phys = np.zeros((B, num_layers, max_neurons), dtype=np.int64)
-    local_t_last = np.zeros((B, num_layers), dtype=np.int64)
-
-    for b in range(B):
-        write_idx = 0
-        spikes = []
-
-        for t in range(T):
-            frame_t = frames_batch[b, t]
-            if not np.any(frame_t):
-                continue
-
-            active_p, active_x, active_y = np.where(frame_t > 0)
-            active_neurons = (active_x + Y * active_y + (X * Y) * active_p).astype(np.int64)
-
-            for l in range(num_layers):
-                n = model.layers["tau"][l].shape[0]
-                mf_view = local_membrane_potential_fict[b, l, :n]
-                mp_view = local_membrane_potential_phys[b, l, :n]
-                t_last_view = local_t_last[b, l]
-
-                t_last_new, active_next = layer_step.py_func(
-                    active_neurons,
-                    np.int64(t),
-                    model.layers["prev_neuron_id"][l],
-                    model.layers["tau"][l],
-                    model.layers["v_th"][l],
-                    t_last_view,
-                    mf_view,
-                    mp_view,
-                    model.layers["membrane_potential_map"][l],
-                    model.layers["synapse_w_matrix"][l],
-                    model.m_bit_mask,
-                    model.t_bit_mask,
-                )
-
-                local_t_last[b, l] = t_last_new
-                active_neurons = active_next
-
-                if active_neurons.size == 0:
-                    break
-
-                if return_intermediates:
-                    for idx in active_neurons:
-                        activations[l][b, idx] += 1
-
-                # accumulate LUT deltas (like numba kernel)
-                lut = model.layers["membrane_potential_map"][l]
-                for i in range(n):
-                    bucket = mp_view[i]
-                    if 0 <= bucket < 16:
-                        d = alpha * (float(bucket) - lut[i, bucket])
-                        delta_mem_map_batch[b, l, i, bucket] += d
-
-            # optional logging
-            if logger is not None:
-                logger.record_state(model, int(t))
-
-            # collect final-layer spikes
-            num_output_spikes = active_neurons.size
-            can_write = max_spikes_per_sample - write_idx
-            if can_write > 0:
-                num_to_write = min(num_output_spikes, can_write)
-                spike_neurons[b, write_idx:write_idx + num_to_write] = active_neurons[:num_to_write]
-                for j in range(num_to_write):
-                    spike_times[b, write_idx + j] = t
-                write_idx += num_to_write
-                for n in active_neurons[:num_to_write]:
-                    spikes.append((int(n), int(t)))
-
-        spike_counts[b] = write_idx
-        outputs.append(np.array(spikes, dtype=dt_dtype))
-
-    # apply LUT deltas (same as numba kernel)
-    delta_sum = delta_mem_map_batch.sum(axis=0)
-    for l in range(num_layers):
-        n = model.layers["membrane_potential_map"][l].shape[0]
-        model.layers["membrane_potential_map"][l][:, :] += delta_sum[l, :n, :]
-
-    return (outputs, activations) if return_intermediates else (outputs, None)
-
-
-
-class model:
-    def __init__(self, x=34, y=34, p=2, hidden_sizes=(256,), out_size=10):
-        self.X = x
-        self.Y = y
-        self.P = p
-        self.t_bit = 4
-        self.timestep_max = 2 ** self.t_bit  # must be power of 2
+    def __init__(
+        self,
+        x: int = 34,
+        y: int = 34,
+        p: int = 2,
+        hidden_sizes: Tuple[int, ...] = (256,),
+        out_size: int = 10,
+        t_bits: int = 4,
+        mem_pot_bits: int = 4,
+        lut_alpha: float = 0.001,
+        device: Optional[torch.device] = None,
+    ):
+        super().__init__()
+        self.X, self.Y, self.P = x, y, p
+        self.input_size = x * y * p
+        self.layer_sizes: List[int] = [self.input_size, *hidden_sizes, out_size]
+        self.t_bits = t_bits
+        self.mem_pot_bits = mem_pot_bits
+        self.mem_pot_max = 1 << mem_pot_bits
+        self.timestep_max = 1 << t_bits
         self.t_bit_mask = self.timestep_max - 1
+        self.m_bit_mask = (1 << mem_pot_bits) - 1
+        self.lut_alpha = lut_alpha
 
-        self.m_bit = 4
-        self.mem_pot_max = 2 ** self.m_bit  # must be power of 2
-        self.m_bit_mask = self.mem_pot_max - 1
+        # Build layers
+        self.layers_mod = nn.ModuleList(
+            [
+                SNNLayer(
+                    self.layer_sizes[i],
+                    self.layer_sizes[i + 1],
+                    mem_pot_bits=mem_pot_bits,
+                    t_bits=t_bits,
+                )
+                for i in range(len(self.layer_sizes) - 1)
+            ]
+        )
 
-        layer_sizes = [x*y*p, *hidden_sizes, out_size]
-        self.layer_sizes = layer_sizes
-        self.layers = build_layers(layer_sizes, mem_pot_max=self.mem_pot_max)
+        # Input pseudo-neuron IDs (buffer)
+        input_ids = torch.arange(self.input_size, dtype=torch.int64)
+        self.register_buffer("input_neuron_id", input_ids)
 
-        self.dt_dtype = np.dtype([('n', np.int64), ('t', np.int64)])
+        # Optional logger
         self.logger = None
 
-    def __call__(self, frames_batch, debug=False, return_intermediates=False):
-        if debug:
-           outputs, activations = forward_batch_driver(self, frames_batch, logger=self.logger, return_intermediates=return_intermediates) 
-        else:
-            B, T, P, X, Y = frames_batch.shape
-            out_size = self.layer_sizes[-1]
+        # Device handling
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.to(device)
 
-            # Safe upper bound: at most 'out_size' spikes per timestep
-            max_spikes_per_sample = int(T * out_size)
+        # Structured dtype for output events (n, t)
+        self.dt_dtype = np.dtype([("n", np.int64), ("t", np.int64)])
 
-            # compute max_neurons in Python (Numba-safe arg)
-            max_neurons = 0
-            for arr in self.layers["tau"]:
-                n = arr.shape[0]
-                if n > max_neurons:
-                    max_neurons = n
-
-            spike_neurons, spike_times, spike_counts, activations, delta_mem_map_batch = forward_batch_numba(
-                frames_batch,
-                self.X, 
-                self.Y, 
-                self.P,
-                self.layers["tau"], 
-                self.layers["v_th"], 
-                self.layers["membrane_potential_fict"], 
-                self.layers["membrane_potential_phys"],
-                self.layers["membrane_potential_map"], 
-                self.layers["synapse_w_matrix"],
-                self.layers["prev_neuron_id"],
-                self.m_bit_mask,
-                self.t_bit_mask,
-                max_spikes_per_sample,
-                max_neurons,
-                return_intermediates
-            )
-
-            delta_sum = delta_mem_map_batch.sum(axis=0)
-            # Apply to each layer’s LUT (only the used rows per layer)
-            for l in range(len(self.layers["membrane_potential_map"])):
-                n = self.layers["membrane_potential_map"][l].shape[0]
-                self.layers["membrane_potential_map"][l][:, :] += delta_sum[l, :n, :]
-
-            # Pack per-sample results as structured arrays (slice by counts[b])
-            outputs = []
-
-            for b in range(B):
-                batch_spike_count = int(spike_counts[b])
-
-                if batch_spike_count == 0:
-                    outputs.append(np.empty(0, dtype=self.dt_dtype))
-                    continue
-
-                out = np.empty(batch_spike_count, dtype=self.dt_dtype)
-                out['n'] = spike_neurons[b, :batch_spike_count]
-                out['t'] = spike_times[b, :batch_spike_count]
-                outputs.append(out)
-
-        if return_intermediates:
-            return outputs, activations
-        else:
-            return outputs
-
-    def save(self, path="../checkpoints/model.npz"):
-        """Save all arrays for reproducibility."""
-        data = {}
-        for key, lst in self.layers.items():
-            for i, arr in enumerate(lst):
-                data[f"{key}_{i}"] = np.array(arr)  # safe conversion
-
-        np.savez(path, **data)
-        print(f"✅ Model saved to {path}")
-
-
-    def load(self, path="../checkpoints/model.npz"):
-        """Restore arrays into typed lists."""
-        if not os.path.exists(path):
-            print(f"⚠️ Model file {path} does not exist. Skipping load.")
-            return
-
-        npzfile = np.load(path)
-        restored = {}
-
-        for key in self.layers.keys():
-            typed_list = List()
-            # collect all arrays for this key (sorted to preserve order)
-            subkeys = sorted([k for k in npzfile.files if k.startswith(key + "_")],
-                             key=lambda x: int(x.split("_")[-1]))
-            for subkey in subkeys:
-                typed_list.append(npzfile[subkey])
-            restored[key] = typed_list
-
-        self.layers = restored
-        print(f"✅ Model loaded from {path}")
-
-
+    # -------- Public API --------
     def set_logger(self, logger):
         self.logger = logger
 
+    def _reset_state_batched(self, B: int):
+        for layer in self.layers_mod:
+            layer.reset_state(B)
 
-    def __repr__(self):
-        s = f"SNNModel(\n"
-        s += f"  Input: {self.layer_sizes[0]}\n"
-        s += f"  Hidden: {self.layer_sizes[1:-1]}\n"
-        s += f"  Output: {self.layer_sizes[-1]}\n"
-        s += f"  Layers:\n"
-        for i, n in enumerate(self.layer_sizes):
-            lname = "Input" if i == 0 else f"Layer{i-1}"
-            s += f"    {lname}: {n} neurons\n"
-        s += f")"
-        return s
+    @torch.no_grad()
+    def forward(
+        self,
+        frames_batch: Any,  # np.ndarray or torch.Tensor, shape (B, T, P, X, Y)
+        return_intermediates: bool = False,
+        debug: bool = False,
+    ) -> Any:
+        """
+        Run batch inference with the exact same spike propagation logic as the old model,
+        but processing the entire batch (B) in parallel each timestep.
+        Returns list (len B) of structured arrays [('n','t')], like before.
+        """
+        device = self.device
 
-    def plot_parameters(self, param_name, bins=30, show=True, save_path=None):
+        # Accept numpy input for drop-in compatibility
+        if isinstance(frames_batch, np.ndarray):
+            frames_batch = torch.from_numpy(frames_batch)
+
+        frames_batch = frames_batch.to(device)
+        B, T, P, X, Y = frames_batch.shape
+
+        # Initialize per-batch state
+        self._reset_state_batched(B)
+
+        # For compatibility: collect activations (B, N) per layer if requested
+        if return_intermediates:
+            activations = [
+                torch.zeros(B, layer.n_out, dtype=torch.int64, device=device)
+                for layer in self.layers_mod
+            ]
+        else:
+            activations = None
+
+        # Accumulator for LUT deltas per layer
+        delta_mem_map_sum: List[torch.Tensor] = [
+            torch.zeros(
+                layer.n_out, layer.mem_pot_max, dtype=torch.float32, device=device
+            )
+            for layer in self.layers_mod
+        ]
+
+        outputs_spike_lists: List[List[Tuple[int, int]]] = [[] for _ in range(B)]
+
+        for t in range(T):
+            frame_t = frames_batch[:, t]  # (B, P, X, Y)
+            if not torch.any(frame_t > 0):
+                continue
+
+            # Build (B, N_in) boolean mask of active presyn neurons
+            active_mask_in = (frame_t > 0).reshape(B, -1)  # (B, P*X*Y)
+
+            prev_ids = self.input_neuron_id
+            active_mask = active_mask_in
+            for li, layer in enumerate(self.layers_mod):
+                active_mask = layer.step(
+                    active_mask=active_mask,
+                    t=int(t),
+                    prev_neuron_id=prev_ids,
+                    accumulate_lut_delta=delta_mem_map_sum[li],
+                    alpha=self.lut_alpha,
+                )
+                if return_intermediates:
+                    activations[li] += active_mask.to(torch.int64)
+                prev_ids = layer.neuron_id
+
+            # Final-layer spikes: active_mask (B, N_out) True -> append (n, t) per sample
+            b_idx, n_idx = torch.nonzero(active_mask, as_tuple=True)
+            if b_idx.numel() > 0:
+                # convert to per-sample lists
+                for bb, nn_idx in zip(b_idx.tolist(), n_idx.tolist()):
+                    outputs_spike_lists[bb].append((int(nn_idx), int(t)))
+
+            if self.logger is not None and debug:
+                self.logger.record_state(self, int(t))
+
+        # Convert to structured numpy arrays
+        outputs: List[np.ndarray] = []
+        for b in range(B):
+            spikes = outputs_spike_lists[b]
+            if len(spikes) == 0:
+                outputs.append(np.empty(0, dtype=self.dt_dtype))
+            else:
+                arr = np.empty(len(spikes), dtype=self.dt_dtype)
+                arr["n"] = [n for (n, _) in spikes]
+                arr["t"] = [tt for (_, tt) in spikes]
+                outputs.append(arr)
+
+        # Apply accumulated LUT deltas after processing the whole batch
+        for li, layer in enumerate(self.layers_mod):
+            layer.mem_map.data.add_(delta_mem_map_sum[li])
+
+        if return_intermediates:
+            acts_np = [a.detach().cpu().numpy() for a in activations]
+            return outputs, acts_np
+        else:
+            return outputs
+
+    # -------- Save/Load --------
+    def save(self, path: str = "../checkpoints/model_torch_batched.pt"):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save(self.state_dict(), path)
+        print(f"✅ Torch batched model saved to {path}")
+
+    def load(
+        self,
+        path: str = "../checkpoints/model_torch_batched.pt",
+        map_location: Optional[str] = None,
+    ):
+        if not os.path.exists(path):
+            print(f"⚠️ Model file {path} does not exist. Skipping load.")
+            return
+        self.load_state_dict(torch.load(path, map_location=map_location))
+        print(f"✅ Torch batched model loaded from {path}")
+
+    # -------- Logger compatibility view (batch 0 snapshot) --------
+    @property
+    def layers(self) -> Dict[str, List[np.ndarray]]:
         """
-        Plot distribution of a parameter across all layers.
-        - Discrete small-range ints → bar chart with integer ticks
-        - Continuous values → histogram with bin centers labeled
-        - X-axis labels auto-switch to scientific notation if too long
+        Property that mimics the old nn.layers structure so SNNLogger continues to work.
+        Since states are batched, we expose the **first batch element** for logger inspection.
         """
-        if param_name not in self.layers:
+        names = [f"Layer{i}" for i in range(len(self.layers_mod))]
+        num_neurons = [layer.n_out for layer in self.layers_mod]
+
+        tau = [layer.tau.detach().cpu().numpy() for layer in self.layers_mod]
+        v_th = [layer.v_th.detach().cpu().numpy() for layer in self.layers_mod]
+        neuron_id = [
+            layer.neuron_id.detach().cpu().numpy() for layer in self.layers_mod
+        ]
+
+        # Take batch 0 for stateful buffers
+        mem_fict = [
+            layer.mem_fict.detach().cpu().numpy()[0] for layer in self.layers_mod
+        ]
+        mem_phys = [
+            layer.mem_phys.detach().cpu().numpy()[0] for layer in self.layers_mod
+        ]
+        mem_map = [layer.mem_map.detach().cpu().numpy() for layer in self.layers_mod]
+        syn_w = [layer.syn_w.detach().cpu().numpy() for layer in self.layers_mod]
+
+        prev_neuron_id = []
+        for i, layer in enumerate(self.layers_mod):
+            if i == 0:
+                prev_neuron_id.append(self.input_neuron_id.detach().cpu().numpy())
+            else:
+                prev_neuron_id.append(
+                    self.layers_mod[i - 1].neuron_id.detach().cpu().numpy()
+                )
+
+        return {
+            "name": names,
+            "num_neurons": num_neurons,
+            "tau": tau,
+            "v_th": v_th,
+            "neuron_id": neuron_id,
+            "membrane_potential_fict": mem_fict,
+            "membrane_potential_phys": mem_phys,
+            "membrane_potential_map": mem_map,
+            "synapse_w_matrix": syn_w,
+            "prev_neuron_id": prev_neuron_id,
+        }
+
+    # -------- Plot helpers (compatible with old API) --------
+    def plot_parameters(
+        self,
+        param_name: str,
+        bins: int = 30,
+        show: bool = True,
+        save_path: Optional[str] = None,
+    ):
+        layers = self.layers
+        if param_name not in layers:
             raise ValueError(
                 f"Parameter '{param_name}' not found in model.layers. "
-                f"Available: {list(self.layers.keys())}"
+                f"Available: {list(layers.keys())}"
             )
 
-        arrays = [np.array(arr).ravel() for arr in self.layers[param_name]]
+        arrays = [np.array(arr).ravel() for arr in layers[param_name]]
+        arrays = [a for a in arrays if a.size > 0 and np.issubdtype(a.dtype, np.number)]
+        if len(arrays) == 0:
+            print(f"⚠️ Nothing numeric to plot for '{param_name}'.")
+            return
+
         values = np.concatenate(arrays)
 
         fig, ax = plt.subplots(figsize=(6, 4))
 
-        # Case 1: discrete small-range ints (like neuron_id)
         if np.issubdtype(values.dtype, np.integer) and values.max() - values.min() < 64:
             unique, counts = np.unique(values, return_counts=True)
             ax.bar(unique, counts, align="center", alpha=0.7, edgecolor="black")
@@ -541,20 +422,25 @@ class model:
             ax.set_xlabel(param_name)
             ax.set_ylabel("Count")
             ax.set_title(f"Distribution of {param_name}")
-
-        # Case 2: continuous values
         else:
-            counts, edges, bars = ax.hist(values, bins=bins, edgecolor="black", alpha=0.7)
+            counts, edges, bars = ax.hist(
+                values, bins=bins, edgecolor="black", alpha=0.7
+            )
             bin_centers = 0.5 * (edges[:-1] + edges[1:])
             ax.set_xticks(bin_centers)
-            ax.set_xticklabels([f"{c:.2e}" if (abs(c) >= 1e3 or abs(c) <= 1e-3) else f"{c:.2f}" 
-                                for c in bin_centers], rotation=45, fontsize=8)
+            ax.set_xticklabels(
+                [
+                    f"{c:.2e}" if (abs(c) >= 1e3 or abs(c) <= 1e-3) else f"{c:.2f}"
+                    for c in bin_centers
+                ],
+                rotation=45,
+                fontsize=8,
+            )
             ax.set_xlabel(param_name)
             ax.set_ylabel("Count")
             ax.set_title(f"Distribution of {param_name}")
             ax.grid(True, linestyle="--", alpha=0.6)
 
-        # Force scientific notation globally if needed
         ax.xaxis.set_major_formatter(ScalarFormatter(useMathText=True))
         ax.ticklabel_format(axis="x", style="sci", scilimits=(-3, 3))
 
@@ -565,39 +451,30 @@ class model:
         else:
             plt.close(fig)
 
+    def plot_membrane_potential_map(
+        self,
+        layer_idx: int,
+        neuron_idx: int,
+        show: bool = True,
+        save_path: Optional[str] = None,
+    ):
+        layer = self.layers_mod[layer_idx]
+        mem_map = layer.mem_map.detach().cpu().numpy()[neuron_idx]
 
-    def plot_membrane_potential_map(self, layer_idx, neuron_idx, show=True, save_path=None):
-        """
-        Plot the membrane potential map of a single neuron in a given layer,
-        sorted by ascending value. X-axis shows the binary key values.
-
-        Args:
-            layer_idx (int): Index of the layer (0 = first hidden layer).
-            neuron_idx (int): Index of the neuron in that layer.
-            show (bool): Whether to display the plot immediately.
-            save_path (str or None): If given, save the figure to this path.
-        """
-        # Extract the map row
-        mem_map = np.array(self.layers["membrane_potential_map"][layer_idx][neuron_idx])
-
-        # Generate keys (e.g. 0000..1111 for 16 buckets)
         num_keys = mem_map.shape[0]
         bit_width = int(np.ceil(np.log2(num_keys)))
         keys_bin = [format(k, f"0{bit_width}b") for k in range(num_keys)]
 
-        # Sort values and corresponding keys
         sorted_idx = np.argsort(mem_map)
         sorted_vals = mem_map[sorted_idx]
         sorted_keys = [keys_bin[i] for i in sorted_idx]
 
-        # Plot
         fig, ax = plt.subplots(figsize=(8, 4))
-        ax.plot(range(num_keys), sorted_vals, marker="o", linestyle="-", color="tab:blue")
-
-        # Set binary keys as x-ticks
+        ax.plot(
+            range(num_keys), sorted_vals, marker="o", linestyle="-", color="tab:blue"
+        )
         ax.set_xticks(range(num_keys))
         ax.set_xticklabels(sorted_keys, rotation=45, ha="right", fontsize=8)
-
         ax.set_title(f"Membrane Potential Map - Layer {layer_idx}, Neuron {neuron_idx}")
         ax.set_xlabel("Key (binary)")
         ax.set_ylabel("Membrane potential value")
@@ -609,3 +486,16 @@ class model:
             plt.show()
         else:
             plt.close(fig)
+
+    # -------- Pretty repr --------
+    def __repr__(self):
+        s = "SNNModel_Torch_Batched(\n"
+        s += f"  Input: {self.layer_sizes[0]}\n"
+        s += f"  Hidden: {self.layer_sizes[1:-1]}\n"
+        s += f"  Output: {self.layer_sizes[-1]}\n"
+        s += f"  Layers:\n"
+        for i, n in enumerate(self.layer_sizes):
+            lname = "Input" if i == 0 else f"Layer{i-1}"
+            s += f"    {lname}: {n} neurons\n"
+        s += ")"
+        return s

@@ -6,7 +6,7 @@ from tqdm import tqdm
 import argparse
 import logging
 
-from SNNModel import model # import your model definition
+from SNNModel import SNNModel  # import your model definition
 from SNNLogger import SNNLogger  # for logging training progress
 from NMNIST_Dataset import NMNIST_Dataset  # custom dataset wrapper
 from train_utils import *
@@ -19,8 +19,9 @@ def collate_frames(batch):
     P, X, Y = frames[0].shape[1:]
     batch_frames = np.zeros((len(frames), max_T, P, X, Y), dtype=frames[0].dtype)
     for i, f in enumerate(frames):
-        batch_frames[i, :f.shape[0]] = f  # pad with zeros
+        batch_frames[i, : f.shape[0]] = f  # pad with zeros
     return batch_frames, np.array(labels)
+
 
 def collate_events(batch):
     # batch is list of (events, label)
@@ -28,26 +29,51 @@ def collate_events(batch):
     labels = [b[1] for b in batch]
     return events, np.array(labels)
 
-def load_nmnist(batch_size=1, samples=100, classes={0,1,2}):
+
+def load_nmnist(batch_size=1, samples=100, classes={0, 1, 2}):
     """
     Load NMNIST dataset with tonic.
     Converts events into numpy arrays with fields x, y, t, p.
     """
 
-    train_dataset = tonic.datasets.NMNIST(save_to="../dataset/nmnist", train=True , transform=None)
-    test_dataset  = tonic.datasets.NMNIST(save_to="../dataset/nmnist", train=False, transform=None)
+    train_dataset = tonic.datasets.NMNIST(
+        save_to="../dataset/nmnist", train=True, transform=None
+    )
+    test_dataset = tonic.datasets.NMNIST(
+        save_to="../dataset/nmnist", train=False, transform=None
+    )
 
     # Filter dataset to only include specified classes and limit samples
-    train_dataset = NMNIST_Dataset(train_dataset, allowed_classes=classes, samples_per_class=samples, use_frames=True, frame_time_window=3000, frame_clip=True)
-    test_dataset  = NMNIST_Dataset(test_dataset , allowed_classes=classes, samples_per_class=samples, use_frames=True, frame_time_window=3000, frame_clip=True)
+    train_dataset = NMNIST_Dataset(
+        train_dataset,
+        allowed_classes=classes,
+        samples_per_class=samples,
+        use_frames=True,
+        frame_time_window=3000,
+        frame_clip=True,
+    )
+    test_dataset = NMNIST_Dataset(
+        test_dataset,
+        allowed_classes=classes,
+        samples_per_class=samples,
+        use_frames=True,
+        frame_time_window=3000,
+        frame_clip=True,
+    )
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True , collate_fn=collate_frames)
-    test_loader  = DataLoader(test_dataset , batch_size=batch_size, shuffle=False, collate_fn=collate_frames)
+    train_loader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_frames
+    )
+    test_loader = DataLoader(
+        test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_frames
+    )
 
     return train_loader, test_loader
 
 
-def train_one_epoch(nn, train_loader, num_classes=5, lr=0.01, epoch_num=0, debug=False, logger=None):
+def train_one_epoch(
+    nn, train_loader, num_classes=5, lr=0.01, epoch_num=0, debug=False, logger=None
+):
     total_loss, correct, total = 0, 0, 0
     num_layers = len(nn.layers["membrane_potential_map"])
 
@@ -58,13 +84,12 @@ def train_one_epoch(nn, train_loader, num_classes=5, lr=0.01, epoch_num=0, debug
         grads = init_grads(nn)
 
         # ---- Forward pass (all samples at once) ----
-        out_spikes_batch, activations = nn(frames_batch, return_intermediates=True)  
+        out_spikes_batch, activations = nn(frames_batch, return_intermediates=True)
 
         # out_spikes_batch is a list of length B
         spike_counts_batch = np.zeros((batch_size, num_classes), dtype=np.int64)
         for i, out_spikes in enumerate(out_spikes_batch):
-            spike_counts_batch[i] = np.bincount(out_spikes['n'], minlength=num_classes)
-
+            spike_counts_batch[i] = np.bincount(out_spikes["n"], minlength=num_classes)
 
         # Loss
         losses, error_grad_out_batch = batch_loss_fn(spike_counts_batch, labels)
@@ -73,7 +98,7 @@ def train_one_epoch(nn, train_loader, num_classes=5, lr=0.01, epoch_num=0, debug
         # Prediction
         preds = np.argmax(spike_counts_batch, axis=1)
         correct += np.sum(preds == labels)
-        total += batch_size 
+        total += batch_size
 
         # ---- Backpropagation ----
         next_error_batch = error_grad_out_batch
@@ -81,26 +106,28 @@ def train_one_epoch(nn, train_loader, num_classes=5, lr=0.01, epoch_num=0, debug
         for l in reversed(range(num_layers)):  # loop over all layers backwards
             # presynaptic activations: activations[l-1]
             if l == 0:
-                batch_activations = frames_batch.sum(axis=1).reshape(100, -1)  # flatten raw input
+                batch_activations = frames_batch.sum(axis=1).reshape(
+                    100, -1
+                )  # flatten raw input
             else:
-                num_neurons = len(nn.layers["tau"][l-1])
-                batch_activations = activations[l-1][:, :num_neurons]
+                num_neurons = len(nn.layers["tau"][l - 1])
+                batch_activations = activations[l - 1][:, :num_neurons]
 
-
-            grads = compute_layer_grads_batch(grads, nn, l, next_error_batch, batch_activations)
+            grads = compute_layer_grads_batch(
+                grads, nn, l, next_error_batch, batch_activations
+            )
 
             if l > 0:
                 next_error_batch = backprop_error_batch(nn.layers, l, next_error_batch)
 
         if debug:
-            logger.info(f"Epoch [{epoch_num}] Batch [{b}]: Loss={total_loss:.4f}, Train Acc={correct / total:.4f}")
-        
+            logger.info(
+                f"Epoch [{epoch_num}] Batch [{b}]: Loss={total_loss:.4f}, Train Acc={correct / total:.4f}"
+            )
 
         update_layer_params(grads, nn, batch_size=batch_size)
 
-
     return total_loss / total, correct / total
-
 
 
 def test_model(nn, test_loader, num_classes):
@@ -117,7 +144,9 @@ def test_model(nn, test_loader, num_classes):
 
         for i, out_spikes in enumerate(out_spikes_batch):
             if out_spikes.size > 0:
-                spike_counts_batch[i] = np.bincount(out_spikes["n"], minlength=num_classes)
+                spike_counts_batch[i] = np.bincount(
+                    out_spikes["n"], minlength=num_classes
+                )
 
         # Predictions
         preds = np.argmax(spike_counts_batch, axis=1)
@@ -130,50 +159,99 @@ def test_model(nn, test_loader, num_classes):
 def get_args():
     parser = argparse.ArgumentParser(description="Train XOR-based SNN on N-MNIST")
 
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
-    parser.add_argument("--run_train"  , action="store_true", default=False, help="Whether to run testing")
-    parser.add_argument("--run_test"   , action="store_true", default=False, help="Whether to run testing")
-    parser.add_argument("--run_sample" , action="store_true", default=False, help="Whether to run testing")
+    parser.add_argument(
+        "--seed", type=int, default=42, help="Random seed for reproducibility"
+    )
+    parser.add_argument(
+        "--run_train", action="store_true", default=False, help="Whether to run testing"
+    )
+    parser.add_argument(
+        "--run_test", action="store_true", default=False, help="Whether to run testing"
+    )
+    parser.add_argument(
+        "--run_sample",
+        action="store_true",
+        default=False,
+        help="Whether to run testing",
+    )
 
     # Dataset args
-    parser.add_argument("--classes", type=int, nargs="+", default=[0,1,2,3,4], help="Which digit classes to use")
-    parser.add_argument("--samples", type=int, default=100, help="Number of per-class samples to use from dataset")
+    parser.add_argument(
+        "--classes",
+        type=int,
+        nargs="+",
+        default=[0, 1, 2, 3, 4],
+        help="Which digit classes to use",
+    )
+    parser.add_argument(
+        "--samples",
+        type=int,
+        default=100,
+        help="Number of per-class samples to use from dataset",
+    )
 
     # Training args
-    parser.add_argument("--epochs", type=int, default=5, help="Number of training epochs")
+    parser.add_argument(
+        "--epochs", type=int, default=5, help="Number of training epochs"
+    )
     parser.add_argument("--batch-size", type=int, default=100, help="Batch size")
     parser.add_argument("--lr", type=float, default=0.01, help="Learning rate")
 
     # Model args
-    parser.add_argument("--save-path", type=str, default="../checkpoints/model.npz", help="Where to save trained model")
+    parser.add_argument(
+        "--save-path",
+        type=str,
+        default="../checkpoints/model.npz",
+        help="Where to save trained model",
+    )
 
-    parser.add_argument("--log-file", type=str, default="training.log", help="Where to save trained model")
-    parser.add_argument("--debug"   , action="store_true", default=False, help="Whether to run testing")
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        default="training.log",
+        help="Where to save trained model",
+    )
+    parser.add_argument(
+        "--debug", action="store_true", default=False, help="Whether to run testing"
+    )
 
-    parser.add_argument("--inspect"   , action="store_true", default=False, help="Whether to run testing")
-    parser.add_argument("--param"   , type=str,  default=None, help="Whether to run testing")
+    parser.add_argument(
+        "--inspect", action="store_true", default=False, help="Whether to run testing"
+    )
+    parser.add_argument(
+        "--param", type=str, default=None, help="Whether to run testing"
+    )
 
-    parser.add_argument("--layer_id"   , type=int,  default=None, help="Whether to run testing")
-    parser.add_argument("--neuron_id"   , type=int,  default=None, help="Whether to run testing")
+    parser.add_argument(
+        "--layer_id", type=int, default=None, help="Whether to run testing"
+    )
+    parser.add_argument(
+        "--neuron_id", type=int, default=None, help="Whether to run testing"
+    )
     return parser.parse_args()
+
 
 if __name__ == "__main__":
     """
-    python model_train.py --run_train 
-    
+    python model_train.py --run_train
+
+    python model_train.py --run_test
+
+    python model_train.py --run_sample
+
     """
 
     args = get_args()
 
     np.random.seed(args.seed)
 
-    hidden_sizes = (4*34*34, 2*34*34)  # example hidden layer sizes
+    hidden_sizes = (4 * 34 * 34, 2 * 34 * 34)  # example hidden layer sizes
 
-    nn = model(
-        x=34, 
-        y=34, 
-        p=2, 
-        hidden_sizes=hidden_sizes, 
+    nn = SNNModel(
+        x=34,
+        y=34,
+        p=2,
+        hidden_sizes=hidden_sizes,
         out_size=5,
     )
 
@@ -184,19 +262,30 @@ if __name__ == "__main__":
         logger.setup_monitoring(nn, choice="select", num_per_layer=1)
         nn.set_logger(logger)
 
-
     if args.run_train:
         logger.info("Starting training...")
-        
+
         # Load dataset
-        train_loader, test_loader = load_nmnist(batch_size=args.batch_size, samples=args.samples, classes=set(args.classes))
+        train_loader, test_loader = load_nmnist(
+            batch_size=args.batch_size, samples=args.samples, classes=set(args.classes)
+        )
 
         # Training loop
         for epoch in range(args.epochs):
-            avg_loss, train_acc = train_one_epoch(nn, train_loader, num_classes=len(args.classes), lr=args.lr, epoch_num=epoch, debug=args.debug, logger=logger)
+            avg_loss, train_acc = train_one_epoch(
+                nn,
+                train_loader,
+                num_classes=len(args.classes),
+                lr=args.lr,
+                epoch_num=epoch,
+                debug=args.debug,
+                logger=logger,
+            )
             test_acc = test_model(nn, test_loader, num_classes=len(args.classes))
 
-            logger.info(f"Epoch [{epoch}]: Loss={avg_loss:.4f}, Train Acc={train_acc:.4f}, Test Acc={test_acc:.4f}")
+            logger.info(
+                f"Epoch [{epoch}]: Loss={avg_loss:.4f}, Train Acc={train_acc:.4f}, Test Acc={test_acc:.4f}"
+            )
 
         # Save model parameters
         nn.save(path=args.save_path)
@@ -205,7 +294,9 @@ if __name__ == "__main__":
         logger.info("Starting testing...")
 
         # Load dataset
-        _, test_loader = load_nmnist(batch_size=args.batch_size, samples=args.samples, classes=set(args.classes))
+        _, test_loader = load_nmnist(
+            batch_size=args.batch_size, samples=args.samples, classes=set(args.classes)
+        )
 
         # Load model parameters
         nn.load(path=args.save_path)
@@ -219,11 +310,11 @@ if __name__ == "__main__":
         # Load model parameters
         _, test_loader = load_nmnist(batch_size=1, samples=1, classes=set(args.classes))
 
-        #nn.load(path=args.save_path)
+        # nn.load(path=args.save_path)
 
         # Sample inference
         sample = next(iter(test_loader))
-        sample_events, label =  sample # get events of first sample
+        sample_events, label = sample  # get events of first sample
 
         logger.info(f"Sample true label: {label}")
         logger.info(f"Sample number of timesteps: {sample_events.shape[1]}")
@@ -241,11 +332,9 @@ if __name__ == "__main__":
         logger.info("Inspecting parameters...")
 
         # Load model parameters
-        #nn.load(path=args.save_path)
+        # nn.load(path=args.save_path)
 
         if args.param:
             nn.plot_parameters(args.param)
         elif args.layer_id is not None and args.neuron_id is not None:
             nn.plot_membrane_potential_map(args.layer_id, args.neuron_id)
-
-        
