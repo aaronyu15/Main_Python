@@ -6,11 +6,14 @@ import torch
 import sys
 from pathlib import Path
 
+# Add parent directory to path so we can import snn module
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 def test_imports():
     """Test that all modules can be imported"""
     print("Testing imports...")
     try:
-        from snn.models import SpikingFlowNet, SpikingFlowNetLite, LIFNeuron
+        from snn.models import SpikingFlowNetLite, EventSNNFlowNetLite, LIFNeuron
         from snn.quantization import QuantizationAwareLayer, BinaryQuantizer
         from snn.data import OpticalFlowDataset
         from snn.training import SNNTrainer, flow_loss
@@ -19,6 +22,8 @@ def test_imports():
         return True
     except Exception as e:
         print(f"✗ Import failed: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
@@ -26,15 +31,7 @@ def test_model_creation():
     """Test model instantiation"""
     print("\nTesting model creation...")
     try:
-        from snn.models import SpikingFlowNet, SpikingFlowNetLite
-        
-        # Test full model
-        model_full = SpikingFlowNet(
-            in_channels=5,
-            num_timesteps=10,
-            quantize=False
-        )
-        print(f"✓ SpikingFlowNet created - Parameters: {sum(p.numel() for p in model_full.parameters()):,}")
+        from snn.models import SpikingFlowNetLite, EventSNNFlowNetLite
         
         # Test lite model
         model_lite = SpikingFlowNetLite(
@@ -43,6 +40,10 @@ def test_model_creation():
             quantize=False
         )
         print(f"✓ SpikingFlowNetLite created - Parameters: {sum(p.numel() for p in model_lite.parameters()):,}")
+        
+        # Test event-based model
+        model_event = EventSNNFlowNetLite()
+        print(f"✓ EventSNNFlowNetLite created - Parameters: {sum(p.numel() for p in model_event.parameters()):,}")
         
         return True
     except Exception as e:
