@@ -40,7 +40,8 @@ quant_weight: 0.0001
 target_spike_rate: 0.1
 
 # Data Settings
-data_root: '../blink_sim/output/train_set_0'  # Path to dataset root directory
+data_root: '../blink_sim/output/train_boy1'  # Path to dataset root directory
+camera_size: [320, 320]
 use_events: true
 crop_size: [320, 320]               # Smaller crops for speed
 max_train_samples: null             # Limit for fast prototyping

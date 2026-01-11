@@ -35,7 +35,8 @@ class OpticalFlowDataset(Dataset):
         transform=None,
         use_events: bool = True,
         num_bins: int = 5,
-        crop_size: Tuple[int, int] = (256, 256),
+        data_size: Tuple[int, int] = (320, 320),
+        crop_size: Tuple[int, int] = (320, 320),
         max_samples: Optional[int] = None
     ):
         """
@@ -54,6 +55,7 @@ class OpticalFlowDataset(Dataset):
         self.use_events = use_events
         self.num_bins = num_bins
         self.crop_size = crop_size
+        self.data_size = data_size
         
         # Find all sequences
         self.sequences = self._find_sequences()
@@ -287,8 +289,8 @@ class OpticalFlowDataset(Dataset):
         p = events[:, 3]
         
         # Get image dimensions
-        height = int(y.max()) + 1
-        width = int(x.max()) + 1
+        height = self.data_size[0]
+        width = self.data_size[1]
         
         # Normalize timestamps to [0, num_bins)
         t_min, t_max = t.min(), t.max()

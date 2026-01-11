@@ -104,6 +104,7 @@ def build_dataloaders(config: dict, data_root: str = None):
         transform=None,  # Let dataset handle cropping for consistency
         use_events=config.get('use_events', True),
         num_bins=num_event_bins,
+        data_size=config.get('data_size', (320, 320)),
         crop_size=config.get('crop_size', (320, 320)),
         max_samples=config.get('max_train_samples', None)
     )
