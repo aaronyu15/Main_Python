@@ -96,12 +96,12 @@ def flow_uv_to_colors(u, v, convert_to_bgr=False):
 def flow_to_color(flow: np.ndarray, max_flow: Optional[float] = None, clip_flow: Optional[float] = None) -> np.ndarray:
     """
     Convert optical flow to color visualization using the Middlebury color scheme
-    
+
     Args:
         flow: Flow array [H, W, 2] or [2, H, W]
-        max_flow: Maximum flow magnitude for normalization (deprecated, use clip_flow)
-        clip_flow: Clip maximum of flow values
-    
+        max_flow: Maximum flow magnitude for normalization (used when provided)
+        clip_flow: Clip maximum of flow values before normalization
+
     Returns:
         Color image [H, W, 3] in range [0, 255]
     """
@@ -114,14 +114,21 @@ def flow_to_color(flow: np.ndarray, max_flow: Optional[float] = None, clip_flow:
     
     if clip_flow is not None:
         flow = np.clip(flow, -clip_flow, clip_flow)
-    
+
     u = flow[:, :, 0]
     v = flow[:, :, 1]
     rad = np.sqrt(np.square(u) + np.square(v))
-    rad_max = np.max(rad)
+
+    # Respect caller-provided max_flow to keep consistent scaling across frames/maps
+    if max_flow is not None and max_flow > 0:
+        rad_max = max_flow
+    else:
+        rad_max = np.max(rad)
+
     epsilon = 1e-5
-    u = u / (rad_max + epsilon)
-    v = v / (rad_max + epsilon)
+    norm = rad_max + epsilon
+    u = u / norm
+    v = v / norm
     
     return flow_uv_to_colors(u, v, convert_to_bgr=False)
 

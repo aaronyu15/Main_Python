@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from .losses import CombinedLoss, endpoint_error
 from ..utils.logger import Logger
-from ..utils.metrics import compute_metrics
+from ..utils.metrics import compute_metrics, calculate_outliers
 
 
 class SNNTrainer:
@@ -105,6 +105,10 @@ class SNNTrainer:
             'quant_loss': 0.0
         }
         epoch_epe = 0.0
+        epoch_outliers = 0.0
+        epoch_flow_max = 0.0
+        epoch_flow_min = 0.0
+        epoch_flow_avg = 0.0
         num_batches = 0
         
         pbar = tqdm(self.train_loader, desc=f"Epoch {self.epoch}")
@@ -112,8 +116,6 @@ class SNNTrainer:
         for batch_idx, batch in enumerate(pbar):
             # Move to device
             inputs = batch['input'].to(self.device)
-            print(inputs.shape)
-            exit()
             gt_flow = batch['flow'].to(self.device)
             valid_mask = batch['valid_mask'].to(self.device)
             
@@ -139,26 +141,42 @@ class SNNTrainer:
             # Compute metrics
             with torch.no_grad():
                 epe = endpoint_error(outputs['flow'], gt_flow, valid_mask)
+                outliers = calculate_outliers(outputs['flow'], gt_flow, valid_mask, threshold=3.0)
+                flow_pred = outputs['flow']
+                flow_max = flow_pred.max().item()
+                flow_min = flow_pred.min().item()
+                flow_avg = flow_pred.abs().mean().item()
             
             # Accumulate losses
             for key in epoch_losses:
-                epoch_losses[key] += losses[key].item()
-            epoch_epe += epe.item()
+                epoch_losses[key] += losses[key]
+            epoch_epe += epe.item()            
+            epoch_outliers += outliers            
+            epoch_flow_max += flow_max
+            epoch_flow_min += flow_min
+            epoch_flow_avg += flow_avg
             num_batches += 1
             
             # Update progress bar
             pbar.set_postfix({
                 'loss': losses['total_loss'].item(),
                 'epe': epe.item(),
+                'outliers': f'{outliers:.2f}%',
                 'lr': self.optimizer.param_groups[0]['lr']
             })
             
             # Log to tensorboard
             if self.global_step % self.config.get('log_interval', 10) == 0:
                 for key, value in losses.items():
-                    self.logger.log_scalar(f'train/{key}', value.item(), self.global_step)
+                    self.logger.log_scalar(f'train/{key}', value, self.global_step)
                 self.logger.log_scalar('train/epe', epe.item(), self.global_step)
+                self.logger.log_scalar('train/outliers', outliers, self.global_step)
                 self.logger.log_scalar('train/lr', self.optimizer.param_groups[0]['lr'], self.global_step)
+                
+                # Log flow prediction statistics
+                self.logger.log_scalar('train/flow_max', flow_max, self.global_step)
+                self.logger.log_scalar('train/flow_min', flow_min, self.global_step)
+                self.logger.log_scalar('train/flow_avg', flow_avg, self.global_step)
                 
                 # Log spike statistics
                 if 'spike_stats' in outputs:
@@ -172,8 +190,19 @@ class SNNTrainer:
         for key in epoch_losses:
             epoch_losses[key] /= num_batches
         epoch_epe /= num_batches
+        epoch_outliers /= num_batches
+        epoch_flow_max /= num_batches
+        epoch_flow_min /= num_batches
+        epoch_flow_avg /= num_batches
         
-        return {**epoch_losses, 'epe': epoch_epe}
+        return {
+            **epoch_losses,
+            'epe': epoch_epe,
+            'outliers': epoch_outliers,
+            'flow_max': epoch_flow_max,
+            'flow_min': epoch_flow_min,
+            'flow_avg': epoch_flow_avg
+        }
     
     @torch.no_grad()
     def validate(self) -> Dict[str, float]:
@@ -185,6 +214,10 @@ class SNNTrainer:
             'flow_loss': 0.0
         }
         val_epe = 0.0
+        val_outliers = 0.0
+        val_flow_max = 0.0
+        val_flow_min = 0.0
+        val_flow_avg = 0.0
         num_batches = 0
         
         for batch in tqdm(self.val_loader, desc="Validation"):
@@ -201,19 +234,39 @@ class SNNTrainer:
             
             # Compute metrics
             epe = endpoint_error(outputs['flow'], gt_flow, valid_mask)
+            outliers = calculate_outliers(outputs['flow'], gt_flow, valid_mask, threshold=3.0)
+            flow_pred = outputs['flow']
+            flow_max = flow_pred.max().item()
+            flow_min = flow_pred.min().item()
+            flow_avg = flow_pred.abs().mean().item()
             
             # Accumulate
             val_losses['total_loss'] += losses['total_loss'].item()
             val_losses['flow_loss'] += losses['flow_loss'].item()
             val_epe += epe.item()
+            val_outliers += outliers
+            val_flow_max += flow_max
+            val_flow_min += flow_min
+            val_flow_avg += flow_avg
             num_batches += 1
         
         # Average
         for key in val_losses:
             val_losses[key] /= num_batches
         val_epe /= num_batches
+        val_outliers /= num_batches
+        val_flow_max /= num_batches
+        val_flow_min /= num_batches
+        val_flow_avg /= num_batches
         
-        return {**val_losses, 'epe': val_epe}
+        return {
+            **val_losses,
+            'epe': val_epe,
+            'outliers': val_outliers,
+            'flow_max': val_flow_max,
+            'flow_min': val_flow_min,
+            'flow_avg': val_flow_avg
+        }
     
     def update_quantization(self):
         """Update quantization bit-width based on schedule"""
@@ -306,8 +359,8 @@ class SNNTrainer:
             
             # Log epoch metrics
             print(f"\nEpoch {epoch} Summary:")
-            print(f"  Train - Loss: {train_metrics['total_loss']:.4f}, EPE: {train_metrics['epe']:.4f}")
-            print(f"  Val   - Loss: {val_metrics['total_loss']:.4f}, EPE: {val_metrics['epe']:.4f}")
+            print(f"  Train - Loss: {train_metrics['total_loss']:.4f}, EPE: {train_metrics['epe']:.4f}, Outliers: {train_metrics['outliers']:.2f}%")
+            print(f"  Val   - Loss: {val_metrics['total_loss']:.4f}, EPE: {val_metrics['epe']:.4f}, Outliers: {val_metrics['outliers']:.2f}%")
             
             for key, value in train_metrics.items():
                 self.logger.log_scalar(f'epoch/train_{key}', value, epoch)

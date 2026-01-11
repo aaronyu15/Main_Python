@@ -1,0 +1,56 @@
+# EventSNNFlowNetLite Configuration
+# Newer architecture with temporal bin processing and polarity-separated inputs
+
+# Model Configuration
+model_type: 'EventSNNFlowNetLite'   # Event-aware SNN architecture
+in_channels: 2                       # Polarity channels (positive/negative events)
+num_bins: 5                         # Event temporal bins - controls temporal history length
+                                    # 5 bins = 1 frame period (reference)
+                                    # 8 bins = 1.6x frame period (60% more temporal history)
+                                    # 10 bins = 2x frame period (double temporal history)
+num_timesteps: 5                    # Not used by EventSNNFlowNetLite (uses num_bins instead)
+base_ch: 32                         # Base number of channels in encoder
+tau: 2.0                            # LIF neuron time constant
+threshold: 1.0                      # LIF neuron firing threshold
+alpha: 10.0                         # Surrogate gradient slope (higher = sharper)
+use_bn: false                       # Use batch normalization in spiking blocks
+
+# Quantization Settings (not currently supported by EventSNNFlowNetLite)
+quantization_enabled: false
+initial_bit_width: 32
+binarize: false
+
+# Training Settings
+num_epochs: 100                     # Faster training for prototyping
+batch_size: 8                       # Larger batch for small model
+val_batch_size: 8
+num_workers: 0                      # Use 0 to avoid multiprocessing with h5py
+
+# Optimizer Settings
+learning_rate: 0.0002               # Higher LR for faster convergence
+weight_decay: 0.0001
+lr_milestones: [50, 75]
+lr_gamma: 0.5
+
+# Loss Weights
+flow_weight: 1.0
+smooth_weight: 0.1
+sparsity_weight: 0.01
+quant_weight: 0.0001
+target_spike_rate: 0.1
+
+# Data Settings
+data_root: '../blink_sim/output/train_set_0'  # Path to dataset root directory
+use_events: true
+crop_size: [320, 320]               # Smaller crops for speed
+max_train_samples: null             # Limit for fast prototyping
+max_val_samples: null
+
+# Training Loop Settings
+grad_clip: 1.0
+log_interval: 10
+save_interval: 5 
+
+# Hardware Settings
+target_hardware: 'FPGA'
+target_power_budget: 'low'

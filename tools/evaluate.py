@@ -10,7 +10,7 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from snn.models import SpikingFlowNet, SpikingFlowNetLite
+from snn.models import SpikingFlowNetLite, EventSNNFlowNetLite
 from snn.data import OpticalFlowDataset
 from snn.utils import compute_metrics, visualize_flow, plot_flow_comparison, save_flow_image
 
@@ -45,22 +45,28 @@ def load_model(checkpoint_path: str, device: str):
     
     # Build model
     model_type = config.get('model_type', 'SpikingFlowNet')
-    model_params = {
-        'in_channels': config.get('in_channels', 5),
-        'num_timesteps': config.get('num_timesteps', 10),
-        'tau': config.get('tau', 2.0),
-        'threshold': config.get('threshold', 1.0),
-        'quantize': config.get('quantization_enabled', False),
-        'bit_width': config.get('initial_bit_width', 32),
-        'binarize': config.get('binarize', False)
-    }
     
-    if model_type == 'SpikingFlowNet':
-        model = SpikingFlowNet(**model_params)
-    elif model_type == 'SpikingFlowNetLite':
-        model = SpikingFlowNetLite(**model_params)
+    if model_type == 'EventSNNFlowNetLite':
+        model = EventSNNFlowNetLite(
+            base_ch=config.get('base_ch', 32),
+            tau=config.get('tau', 2.0),
+            threshold=config.get('threshold', 1.0),
+            alpha=config.get('alpha', 10.0),
+            use_bn=config.get('use_bn', False)
+        )
     else:
-        raise ValueError(f"Unknown model type: {model_type}")
+        # SpikingFlowNet and SpikingFlowNetLite both use SpikingFlowNetLite
+        model_params = {
+            'in_channels': config.get('in_channels', 5),
+            'num_timesteps': config.get('num_timesteps', 10),
+            'tau': config.get('tau', 2.0),
+            'threshold': config.get('threshold', 1.0),
+            'quantize': config.get('quantization_enabled', False),
+            'bit_width': config.get('initial_bit_width', 32),
+            'binarize': config.get('binarize', False)
+        }
+        
+        model = SpikingFlowNetLite(**model_params)
     
     # Load weights
     model.load_state_dict(checkpoint['model_state_dict'])

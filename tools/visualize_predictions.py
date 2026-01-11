@@ -16,7 +16,7 @@ import yaml
 
 import sys 
 sys.path.insert(0, '..')
-from snn.models import SpikingFlowNet, SpikingFlowNetLite
+from snn.models import SpikingFlowNetLite, EventSNNFlowNetLite
 from snn.data import OpticalFlowDataset
 from snn.utils.visualization import visualize_flow, flow_to_color
 
@@ -47,33 +47,26 @@ def load_model_from_checkpoint(
     # Build model architecture
     model_type = config.get('model_type', 'SpikingFlowNet')
     
-    # Common parameters
-    common_params = {
-        'in_channels': config.get('in_channels', 5),
-        'num_timesteps': config.get('num_timesteps', 10),
-        'tau': config.get('tau', 2.0),
-        'threshold': config.get('threshold', 1.0),
-        'binarize': config.get('binarize', False),
-    }
-    
-    if model_type == 'SpikingFlowNet':
-        # Full model uses quantization_enabled and initial_bit_width
+    if model_type == 'EventSNNFlowNetLite':
+        model = EventSNNFlowNetLite(
+            base_ch=config.get('base_ch', 32),
+            tau=config.get('tau', 2.0),
+            threshold=config.get('threshold', 1.0),
+            alpha=config.get('alpha', 10.0),
+            use_bn=config.get('use_bn', False)
+        )
+    else:
+        # SpikingFlowNet and SpikingFlowNetLite both use SpikingFlowNetLite
         model_params = {
-            **common_params,
-            'quantization_enabled': config.get('quantization_enabled', False),
-            'initial_bit_width': config.get('initial_bit_width', 32),
-        }
-        model = SpikingFlowNet(**model_params)
-    elif model_type == 'SpikingFlowNetLite':
-        # Lite model uses quantize and bit_width
-        model_params = {
-            **common_params,
+            'in_channels': config.get('in_channels', 5),
+            'num_timesteps': config.get('num_timesteps', 10),
+            'tau': config.get('tau', 2.0),
+            'threshold': config.get('threshold', 1.0),
+            'binarize': config.get('binarize', False),
             'quantize': config.get('quantization_enabled', False),
-            'bit_width': config.get('initial_bit_width', 4),
+            'bit_width': config.get('initial_bit_width', 4 if model_type == 'SpikingFlowNetLite' else 32),
         }
         model = SpikingFlowNetLite(**model_params)
-    else:
-        raise ValueError(f"Unknown model type: {model_type}")
     
     # Load checkpoint
     checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -105,8 +98,6 @@ def load_dataset(config: dict, data_root: Optional[str] = None) -> OpticalFlowDa
     Returns:
         Dataset instance
     """
-    if data_root is None:
-        data_root = '../' + config.get('data_root', '../blink_sim/output')
     
     # Get number of event bins (use num_bins if specified, otherwise fall back to in_channels)
     num_event_bins = config.get('num_bins', config.get('in_channels', 5))
@@ -236,7 +227,8 @@ def visualize_flow_comparison(
     # Compute max flow for consistent visualization
     max_flow = max(
         np.sqrt((flow_gt**2).sum(axis=0)).max(),
-        np.sqrt((flow_pred**2).sum(axis=0)).max()
+        np.sqrt((flow_pred**2).sum(axis=0)).max(),
+        1.0
     )
     
     # Row 1: Input visualization
@@ -362,7 +354,8 @@ def create_flow_animation(
         # Compute max flow for consistent coloring
         max_flow = max(
             np.sqrt((flow_gt**2).sum(axis=0)).max(),
-            np.sqrt((flow_pred**2).sum(axis=0)).max()
+            np.sqrt((flow_pred**2).sum(axis=0)).max(),
+            1.0
         )
         
         # Clear axes
@@ -453,7 +446,7 @@ def main():
     parser.add_argument(
         '--data-root',
         type=str,
-        default=None,
+        default='../../blink_sim/output',
         help='Override data root path'
     )
     parser.add_argument(
@@ -461,7 +454,7 @@ def main():
         type=int,
         nargs='+',
         default=[0, 10, 20, 30, 40],
-        help='Sample indices to visualize'
+        help='Frame indices within the selected sequence to visualize (0-based)'
     )
     parser.add_argument(
         '--output-dir',
@@ -483,7 +476,7 @@ def main():
     parser.add_argument(
         '--sequence',
         type=str,
-        default=None,
+        default="girl1_BaseballHit_0",
         help='Sequence name to visualize (e.g., girl1_BaseballHit_0)'
     )
     parser.add_argument(
@@ -527,21 +520,57 @@ def main():
     print("\nLoading dataset...")
     dataset = load_dataset(config, args.data_root)
     print(f"Loaded dataset with {len(dataset)} samples")
+
+    # Map sequences to their dataset indices for convenient lookup
+    sequences = get_sequences(dataset)
     
     # List sequences if requested
     if args.list_sequences:
         list_sequences(dataset)
         return
+
+    # Validate requested sequence early
+    if args.sequence and args.sequence not in sequences:
+        print(f"\nError: Sequence '{args.sequence}' not found!")
+        print("Available sequences:")
+        for seq_name in sorted(sequences.keys()):
+            print(f"  - {seq_name}")
+        return
     
-    # Visualize individual samples
-    print(f"\nVisualizing samples: {args.sample_idx}")
-    for idx in args.sample_idx:
-        if idx >= len(dataset):
-            print(f"Warning: Sample {idx} exceeds dataset size, skipping")
+    # Visualize individual samples using the requested sequence
+    if args.sequence:
+        raw_sequence_indices = sequences[args.sequence]
+        sequence_indices = raw_sequence_indices[:-1] if len(raw_sequence_indices) > 1 else raw_sequence_indices
+        if len(raw_sequence_indices) != len(sequence_indices):
+            print(f"\nNote: Skipping terminal frame for '{args.sequence}' to avoid missing forward-neighbor artifacts.")
+        print(f"\nVisualizing sequence '{args.sequence}' with {len(sequence_indices)} usable frames (of {len(raw_sequence_indices)})")
+
+        selected_pairs = []  # (frame_idx_in_sequence, dataset_idx)
+        for frame_idx in args.sample_idx:
+            if frame_idx >= len(sequence_indices):
+                print(f"Warning: Frame {frame_idx} exceeds usable sequence length ({len(sequence_indices)}), skipping")
+                continue
+            selected_pairs.append((frame_idx, sequence_indices[frame_idx]))
+
+        if not selected_pairs:
+            print("No valid frame indices selected; nothing to visualize.")
+            return
+    else:
+        # Fallback to global indices if no sequence is specified
+        selected_pairs = [(None, idx) for idx in args.sample_idx]
+        print(f"\nVisualizing samples (global indices): {args.sample_idx}")
+
+    for frame_idx, dataset_idx in selected_pairs:
+        if dataset_idx >= len(dataset):
+            print(f"Warning: Sample {dataset_idx} exceeds dataset size, skipping")
             continue
-        
-        print(f"\nProcessing sample {idx}...")
-        sample = dataset[idx]
+
+        if frame_idx is not None:
+            print(f"\nProcessing sequence frame {frame_idx} (dataset index {dataset_idx})...")
+        else:
+            print(f"\nProcessing sample {dataset_idx}...")
+
+        sample = dataset[dataset_idx]
         
         # Run inference
         flow_pred, metrics = run_inference(model, sample, device)
@@ -551,7 +580,7 @@ def main():
         print(f"  Max Flow Pred: {metrics['max_flow_pred']:.2f}")
         
         # Visualize
-        save_path = output_dir / f"sample_{idx:04d}.png"
+        save_path = output_dir / f"sample_{dataset_idx:04d}.png"
         visualize_flow_comparison(
             sample['input'],
             sample['flow'],
@@ -563,9 +592,6 @@ def main():
     
     # Create animation if requested
     if args.create_animation:
-        # Get sequences
-        sequences = get_sequences(dataset)
-        
         # Determine which samples to animate
         if args.sequence:
             # Use specific sequence
@@ -575,10 +601,13 @@ def main():
                 for seq_name in sorted(sequences.keys()):
                     print(f"  - {seq_name}")
                 return
-            
-            animation_indices = sequences[args.sequence]
+
+            raw_animation_indices = sequences[args.sequence]
+            animation_indices = raw_animation_indices#[:-1] if len(raw_animation_indices) > 1 else raw_animation_indices
             sequence_name = args.sequence
-            print(f"\nCreating animation for sequence '{args.sequence}' ({len(animation_indices)} frames)...")
+            if len(raw_animation_indices) != len(animation_indices):
+                print(f"\nNote: Skipping terminal frame for '{args.sequence}' animation to avoid missing forward-neighbor artifacts.")
+            print(f"\nCreating animation for sequence '{args.sequence}' with {len(animation_indices)} frames (of {len(raw_animation_indices)})...")
             animation_path = output_dir / f"{args.sequence}_animation.gif"
         else:
             # Select evenly spaced samples across all sequences

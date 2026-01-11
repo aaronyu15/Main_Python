@@ -11,7 +11,7 @@ import yaml
 import sys 
 sys.path.insert(0, '..')
 from snn.data.optical_flow_dataset import OpticalFlowDataset
-from snn.models import SpikingFlowNet, SpikingFlowNetLite
+from snn.models import SpikingFlowNetLite, EventSNNFlowNetLite
 import matplotlib.pyplot as plt
 
 
@@ -23,22 +23,22 @@ def load_model(checkpoint_path, config_path):
     
     # Create model based on config
     model_type = config.get('model_type', 'SpikingFlowNetLite')
-    if model_type == 'SpikingFlowNet':
-        model = SpikingFlowNet(
-            in_channels=config.get('in_channels', 5),
-            num_timesteps=config.get('num_timesteps', 6),
+    if model_type == 'EventSNNFlowNetLite':
+        model = EventSNNFlowNetLite(
+            base_ch=config.get('base_ch', 32),
             tau=config.get('tau', 2.0),
-            threshold=config.get('threshold', 1.0)
+            threshold=config.get('threshold', 1.0),
+            alpha=config.get('alpha', 10.0),
+            use_bn=config.get('use_bn', False)
         )
-    elif model_type == 'SpikingFlowNetLite':
+    else:
+        # SpikingFlowNet and SpikingFlowNetLite both use SpikingFlowNetLite
         model = SpikingFlowNetLite(
             in_channels=config.get('in_channels', 5),
             num_timesteps=config.get('num_timesteps', 6),
             tau=config.get('tau', 2.0),
             threshold=config.get('threshold', 1.0)
         )
-    else:
-        raise ValueError(f"Unknown model type: {model_type}")
     
     # Load checkpoint
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
