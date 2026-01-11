@@ -34,3 +34,6 @@ Thumbs.db
 *.log
 *.tmp
 *.bak
+
+# Micromamba
+y
