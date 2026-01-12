@@ -15,7 +15,8 @@ from tqdm import tqdm
 
 from .losses import CombinedLoss, endpoint_error
 from ..utils.logger import Logger
-from ..utils.metrics import compute_metrics, calculate_outliers
+from ..utils.metrics import (compute_metrics, calculate_outliers, 
+                             calculate_effective_epe, calculate_multi_percentile_epe)
 
 
 class SNNTrainer:
@@ -86,12 +87,14 @@ class SNNTrainer:
         
         # Quantization schedule
         self.quantization_enabled = config.get('quantization_enabled', False)
-        self.quantization_schedule = config.get('quantization_schedule', {
-            0: 32,      # Epochs 0+: Full precision
-            50: 8,      # Epochs 50+: 8-bit
-            100: 4,     # Epochs 100+: 4-bit
-            150: 1      # Epochs 150+: Binary
-        })
+        
+        # If no schedule provided, use initial_bit_width for all epochs
+        if 'quantization_schedule' in config:
+            self.quantization_schedule = config['quantization_schedule']
+        else:
+            # Create simple schedule: keep initial bit-width throughout training
+            initial_bw = config.get('initial_bit_width', 8)
+            self.quantization_schedule = {0: initial_bw}
         
     def train_epoch(self) -> Dict[str, float]:
         """Train for one epoch"""
@@ -142,6 +145,16 @@ class SNNTrainer:
             with torch.no_grad():
                 epe = endpoint_error(outputs['flow'], gt_flow, valid_mask)
                 outliers = calculate_outliers(outputs['flow'], gt_flow, valid_mask, threshold=3.0)
+                
+                # Effective pixel metrics (flow magnitude > 0.1)
+                epe_effective = calculate_effective_epe(outputs['flow'], gt_flow, valid_mask, threshold=0.1)
+                
+                # Percentile-based metrics (top 50%, 25%, 10%, 5%)
+                percentile_metrics = calculate_multi_percentile_epe(
+                    outputs['flow'], gt_flow, valid_mask, 
+                    percentiles=[50, 75, 90, 95]
+                )
+                
                 flow_pred = outputs['flow']
                 flow_max = flow_pred.max().item()
                 flow_min = flow_pred.min().item()
@@ -170,6 +183,13 @@ class SNNTrainer:
                 for key, value in losses.items():
                     self.logger.log_scalar(f'train/{key}', value, self.global_step)
                 self.logger.log_scalar('train/epe', epe.item(), self.global_step)
+                self.logger.log_scalar('train/epe_effective', epe_effective, self.global_step)
+                
+                # Log percentile-based EPE
+                for key, value in percentile_metrics.items():
+                    if 'epe' in key:
+                        self.logger.log_scalar(f'train/{key}', value, self.global_step)
+                
                 self.logger.log_scalar('train/outliers', outliers, self.global_step)
                 self.logger.log_scalar('train/lr', self.optimizer.param_groups[0]['lr'], self.global_step)
                 
@@ -214,6 +234,11 @@ class SNNTrainer:
             'flow_loss': 0.0
         }
         val_epe = 0.0
+        val_epe_effective = 0.0
+        val_epe_top50pct = 0.0
+        val_epe_top25pct = 0.0
+        val_epe_top10pct = 0.0
+        val_epe_top5pct = 0.0
         val_outliers = 0.0
         val_flow_max = 0.0
         val_flow_min = 0.0
@@ -235,6 +260,16 @@ class SNNTrainer:
             # Compute metrics
             epe = endpoint_error(outputs['flow'], gt_flow, valid_mask)
             outliers = calculate_outliers(outputs['flow'], gt_flow, valid_mask, threshold=3.0)
+            
+            # Effective pixel metrics
+            epe_effective = calculate_effective_epe(outputs['flow'], gt_flow, valid_mask, threshold=0.1)
+            
+            # Percentile-based metrics
+            percentile_metrics = calculate_multi_percentile_epe(
+                outputs['flow'], gt_flow, valid_mask,
+                percentiles=[50, 75, 90, 95]
+            )
+            
             flow_pred = outputs['flow']
             flow_max = flow_pred.max().item()
             flow_min = flow_pred.min().item()
@@ -244,6 +279,11 @@ class SNNTrainer:
             val_losses['total_loss'] += losses['total_loss'].item()
             val_losses['flow_loss'] += losses['flow_loss'].item()
             val_epe += epe.item()
+            val_epe_effective += epe_effective
+            val_epe_top50pct += percentile_metrics['epe_top50pct']
+            val_epe_top25pct += percentile_metrics['epe_top25pct']
+            val_epe_top10pct += percentile_metrics['epe_top10pct']
+            val_epe_top5pct += percentile_metrics['epe_top5pct']
             val_outliers += outliers
             val_flow_max += flow_max
             val_flow_min += flow_min
@@ -254,6 +294,11 @@ class SNNTrainer:
         for key in val_losses:
             val_losses[key] /= num_batches
         val_epe /= num_batches
+        val_epe_effective /= num_batches
+        val_epe_top50pct /= num_batches
+        val_epe_top25pct /= num_batches
+        val_epe_top10pct /= num_batches
+        val_epe_top5pct /= num_batches
         val_outliers /= num_batches
         val_flow_max /= num_batches
         val_flow_min /= num_batches
@@ -262,6 +307,11 @@ class SNNTrainer:
         return {
             **val_losses,
             'epe': val_epe,
+            'epe_effective': val_epe_effective,
+            'epe_top50pct': val_epe_top50pct,
+            'epe_top25pct': val_epe_top25pct,
+            'epe_top10pct': val_epe_top10pct,
+            'epe_top5pct': val_epe_top5pct,
             'outliers': val_outliers,
             'flow_max': val_flow_max,
             'flow_min': val_flow_min,
@@ -273,23 +323,39 @@ class SNNTrainer:
         if not self.quantization_enabled:
             return
         
-        # Find current bit width
-        current_bit_width = 32
-        for epoch_threshold, bit_width in sorted(self.quantization_schedule.items()):
+        # Find current bit width from schedule
+        current_bit_width = None
+        for epoch_threshold in sorted(self.quantization_schedule.keys(), reverse=True):
             if self.epoch >= epoch_threshold:
-                current_bit_width = bit_width
+                current_bit_width = self.quantization_schedule[epoch_threshold]
+                break
         
-        # Update model quantization
+        if current_bit_width is None:
+            return  # No schedule entry applies yet
+        
+        # Update model quantization bit-width
+        updated = False
         for module in self.model.modules():
             if hasattr(module, 'bit_width'):
                 if module.bit_width != current_bit_width:
-                    print(f"Updating quantization: {module.bit_width}-bit -> {current_bit_width}-bit")
+                    if not updated:  # Only print once
+                        print(f"Epoch {self.epoch}: Updating quantization {module.bit_width}-bit -> {current_bit_width}-bit")
+                        updated = True
                     module.bit_width = current_bit_width
                     
-                    # Reset quantization calibration
-                    if hasattr(module, 'quant_layer'):
+                    # Update quantization layer if it exists
+                    if hasattr(module, 'quant_layer') and module.quant_layer is not None:
                         module.quant_layer.bit_width = current_bit_width
-                        module.quant_layer.calibrated = False
+                        # Reset running statistics for new bit-width
+                        module.quant_layer.num_batches_tracked.zero_()
+                        
+                        # Update qmin/qmax for new bit-width
+                        if module.quant_layer.symmetric:
+                            module.quant_layer.qmin = -(2 ** (current_bit_width - 1))
+                            module.quant_layer.qmax = 2 ** (current_bit_width - 1) - 1
+                        else:
+                            module.quant_layer.qmin = 0
+                            module.quant_layer.qmax = 2 ** current_bit_width - 1
     
     def save_checkpoint(self, filename: str = 'checkpoint.pth', is_best: bool = False):
         """Save checkpoint"""
@@ -361,6 +427,8 @@ class SNNTrainer:
             print(f"\nEpoch {epoch} Summary:")
             print(f"  Train - Loss: {train_metrics['total_loss']:.4f}, EPE: {train_metrics['epe']:.4f}, Outliers: {train_metrics['outliers']:.2f}%")
             print(f"  Val   - Loss: {val_metrics['total_loss']:.4f}, EPE: {val_metrics['epe']:.4f}, Outliers: {val_metrics['outliers']:.2f}%")
+            print(f"  Val EPE (Effective) - All: {val_metrics['epe']:.4f}, Flow>0.1: {val_metrics['epe_effective']:.4f}")
+            print(f"  Val EPE (Percentiles) - Top50%: {val_metrics['epe_top50pct']:.4f}, Top25%: {val_metrics['epe_top25pct']:.4f}, Top10%: {val_metrics['epe_top10pct']:.4f}, Top5%: {val_metrics['epe_top5pct']:.4f}")
             
             for key, value in train_metrics.items():
                 self.logger.log_scalar(f'epoch/train_{key}', value, epoch)

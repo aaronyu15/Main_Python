@@ -51,7 +51,10 @@ def build_model(config: dict) -> torch.nn.Module:
             tau=config.get('tau', 2.0),
             threshold=config.get('threshold', 1.0),
             alpha=config.get('alpha', 10.0),
-            use_bn=config.get('use_bn', False)
+            use_bn=config.get('use_bn', False),
+            quantize=config.get('quantization_enabled', False),
+            bit_width=config.get('initial_bit_width', 8),
+            binarize=config.get('binarize', False)
         )
     else:
         # SpikingFlowNet and SpikingFlowNetLite use these parameters

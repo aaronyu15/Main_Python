@@ -96,6 +96,8 @@ class EventSNNFlowNetLite(nn.Module):
     """
     Input:  x [N, T, 2, H, W]  (T time bins, 2 polarities)
     Output: flow [N, 2, H, W]
+    
+    Supports quantization-aware training for hardware deployment
     """
     def __init__(
         self,
@@ -104,19 +106,26 @@ class EventSNNFlowNetLite(nn.Module):
         threshold=1.0,
         alpha=10.0,
         use_bn=False,
+        quantize=False,
+        bit_width=8,
+        binarize=False
     ):
         super().__init__()
+        
+        # Quantization settings
+        self.quantize = quantize
+        self.bit_width = 1 if binarize else bit_width
 
         # Encoder (downsample by 2 each stage)
-        self.e1 = SpikingConvBlock(2, base_ch,     k=5, s=2, p=2, tau=tau, threshold=threshold, alpha=alpha, use_bn=use_bn)
-        self.e2 = SpikingConvBlock(base_ch, base_ch*2, k=3, s=2, p=1, tau=tau, threshold=threshold, alpha=alpha, use_bn=use_bn)
-        self.e3 = SpikingConvBlock(base_ch*2, base_ch*4, k=3, s=2, p=1, tau=tau, threshold=threshold, alpha=alpha, use_bn=use_bn)
+        self.e1 = SpikingConvBlock(2, base_ch,     k=5, s=2, p=2, tau=tau, threshold=threshold, alpha=alpha, use_bn=use_bn, quantize=quantize, bit_width=self.bit_width)
+        self.e2 = SpikingConvBlock(base_ch, base_ch*2, k=3, s=2, p=1, tau=tau, threshold=threshold, alpha=alpha, use_bn=use_bn, quantize=quantize, bit_width=self.bit_width)
+        self.e3 = SpikingConvBlock(base_ch*2, base_ch*4, k=3, s=2, p=1, tau=tau, threshold=threshold, alpha=alpha, use_bn=use_bn, quantize=quantize, bit_width=self.bit_width)
 
         # Decoder (upsample + spiking conv)
         # Using conv after upsample tends to be friendlier than ConvTranspose2d on hardware.
-        self.d3 = SpikingConvBlock(base_ch*4, base_ch*2, k=3, s=1, p=1, tau=tau, threshold=threshold, alpha=alpha, use_bn=use_bn)
-        self.d2 = SpikingConvBlock(base_ch*2 + base_ch*2, base_ch, k=3, s=1, p=1, tau=tau, threshold=threshold, alpha=alpha, use_bn=use_bn)
-        self.d1 = SpikingConvBlock(base_ch + base_ch, base_ch, k=3, s=1, p=1, tau=tau, threshold=threshold, alpha=alpha, use_bn=use_bn)
+        self.d3 = SpikingConvBlock(base_ch*4, base_ch*2, k=3, s=1, p=1, tau=tau, threshold=threshold, alpha=alpha, use_bn=use_bn, quantize=quantize, bit_width=self.bit_width)
+        self.d2 = SpikingConvBlock(base_ch*2 + base_ch*2, base_ch, k=3, s=1, p=1, tau=tau, threshold=threshold, alpha=alpha, use_bn=use_bn, quantize=quantize, bit_width=self.bit_width)
+        self.d1 = SpikingConvBlock(base_ch + base_ch, base_ch, k=3, s=1, p=1, tau=tau, threshold=threshold, alpha=alpha, use_bn=use_bn, quantize=quantize, bit_width=self.bit_width)
 
         # Non-spiking regression head (keep it simple & stable)
         self.flow_head = nn.Conv2d(base_ch, 2, kernel_size=3, padding=1)

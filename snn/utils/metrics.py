@@ -177,3 +177,119 @@ def compute_metrics_by_magnitude(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
             results[bin_name] = compute_metrics(pred_flow, gt_flow, bin_mask)
         
     return results
+
+
+def calculate_effective_epe(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
+                            valid_mask: Optional[torch.Tensor] = None,
+                            threshold: float = 0.1) -> float:
+    """
+    Calculate EPE for pixels with ground truth flow magnitude above threshold.
+    This focuses on moving objects rather than static regions.
+    
+    Args:
+        pred_flow: Predicted flow [B, 2, H, W] or [2, H, W]
+        gt_flow: Ground truth flow [B, 2, H, W] or [2, H, W]
+        valid_mask: Valid mask [B, 1, H, W] or [1, H, W]
+        threshold: Minimum GT flow magnitude to consider (default: 0.1)
+    
+    Returns:
+        EPE for effective pixels only
+    """
+    # Compute GT flow magnitude
+    gt_mag = torch.sqrt(torch.sum(gt_flow ** 2, dim=-3 if gt_flow.dim() == 4 else 0))
+    
+    # Create mask for effective pixels (where flow is significant)
+    effective_mask = (gt_mag > threshold)
+    
+    if valid_mask is not None:
+        valid_mask_2d = valid_mask.squeeze(-3 if valid_mask.dim() == 4 else 0)
+        effective_mask = effective_mask & valid_mask_2d.bool()
+    
+    # If no effective pixels, return 0
+    if effective_mask.sum() == 0:
+        return 0.0
+    
+    # Expand mask to match flow dimensions
+    effective_mask = effective_mask.unsqueeze(-3 if pred_flow.dim() == 4 else 0).float()
+    
+    # Compute EPE only for effective pixels
+    return calculate_epe(pred_flow, gt_flow, effective_mask)
+
+
+def calculate_percentile_epe(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
+                             valid_mask: Optional[torch.Tensor] = None,
+                             percentile: float = 50.0) -> Dict[str, float]:
+    """
+    Calculate EPE for top percentile of GT flow magnitudes.
+    Shows model performance on the most dynamic regions.
+    
+    Args:
+        pred_flow: Predicted flow [B, 2, H, W] or [2, H, W]
+        gt_flow: Ground truth flow [B, 2, H, W] or [2, H, W]
+        valid_mask: Valid mask [B, 1, H, W] or [1, H, W]
+        percentile: Percentile threshold (e.g., 50 = top 50%)
+    
+    Returns:
+        Dictionary with EPE and threshold value
+    """
+    # Compute GT flow magnitude
+    gt_mag = torch.sqrt(torch.sum(gt_flow ** 2, dim=-3 if gt_flow.dim() == 4 else 0))
+    
+    # Get valid pixels
+    if valid_mask is not None:
+        valid_mask_2d = valid_mask.squeeze(-3 if valid_mask.dim() == 4 else 0)
+        valid_gt_mag = gt_mag[valid_mask_2d.bool()]
+    else:
+        valid_gt_mag = gt_mag.flatten()
+    
+    # If no valid pixels, return 0
+    if valid_gt_mag.numel() == 0:
+        return {'epe': 0.0, 'threshold': 0.0, 'num_pixels': 0}
+    
+    # Calculate percentile threshold
+    threshold = torch.quantile(valid_gt_mag, percentile / 100.0).item()
+    
+    # Create mask for pixels above threshold
+    percentile_mask = (gt_mag >= threshold)
+    
+    if valid_mask is not None:
+        percentile_mask = percentile_mask & valid_mask_2d.bool()
+    
+    # Expand mask to match flow dimensions
+    percentile_mask = percentile_mask.unsqueeze(-3 if pred_flow.dim() == 4 else 0).float()
+    
+    # Compute EPE for these pixels
+    epe = calculate_epe(pred_flow, gt_flow, percentile_mask)
+    num_pixels = int(percentile_mask.sum().item())
+    
+    return {
+        'epe': epe,
+        'threshold': threshold,
+        'num_pixels': num_pixels
+    }
+
+
+def calculate_multi_percentile_epe(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
+                                   valid_mask: Optional[torch.Tensor] = None,
+                                   percentiles: list = [50, 75, 90, 95]) -> Dict[str, float]:
+    """
+    Calculate EPE for multiple percentiles of flow magnitude.
+    Useful for understanding model performance across different motion scales.
+    
+    Args:
+        pred_flow: Predicted flow [B, 2, H, W] or [2, H, W]
+        gt_flow: Ground truth flow [B, 2, H, W] or [2, H, W]
+        valid_mask: Valid mask [B, 1, H, W] or [1, H, W]
+        percentiles: List of percentiles to compute (e.g., [50, 75, 90, 95])
+    
+    Returns:
+        Dictionary of EPE values for each percentile
+    """
+    results = {}
+    
+    for p in percentiles:
+        p_result = calculate_percentile_epe(pred_flow, gt_flow, valid_mask, p)
+        results[f'epe_top{int(100-p)}pct'] = p_result['epe']
+        results[f'threshold_top{int(100-p)}pct'] = p_result['threshold']
+    
+    return results

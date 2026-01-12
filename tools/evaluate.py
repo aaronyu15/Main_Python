@@ -10,6 +10,8 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+import sys 
+sys.path.insert(0, '..')
 from snn.models import SpikingFlowNetLite, EventSNNFlowNetLite
 from snn.data import OpticalFlowDataset
 from snn.utils import compute_metrics, visualize_flow, plot_flow_comparison, save_flow_image
@@ -52,7 +54,10 @@ def load_model(checkpoint_path: str, device: str):
             tau=config.get('tau', 2.0),
             threshold=config.get('threshold', 1.0),
             alpha=config.get('alpha', 10.0),
-            use_bn=config.get('use_bn', False)
+            use_bn=config.get('use_bn', False),
+            quantize=config.get('quantization_enabled', False),
+            bit_width=config.get('initial_bit_width', 8),
+            binarize=config.get('binarize', False)
         )
     else:
         # SpikingFlowNet and SpikingFlowNetLite both use SpikingFlowNetLite

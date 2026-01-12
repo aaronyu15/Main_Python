@@ -15,10 +15,17 @@ threshold: 1.0                      # LIF neuron firing threshold
 alpha: 10.0                         # Surrogate gradient slope (higher = sharper)
 use_bn: false                       # Use batch normalization in spiking blocks
 
-# Quantization Settings (not currently supported by EventSNNFlowNetLite)
-quantization_enabled: false
-initial_bit_width: 32
-binarize: false
+# Quantization Settings (now supported by EventSNNFlowNetLite)
+# Note: Start with quantization OFF for baseline, or use 8-bit as starting point
+quantization_enabled: true        # Enable quantization-aware training
+initial_bit_width: 8               # Bit width for quantization (8 is a good starting point)
+binarize: false                    # Use binary (1-bit) quantization
+
+# Recommended workflow:
+# 1. Train baseline without quantization first (quantization_enabled: false)
+# 2. Fine-tune with 8-bit quantization 
+# 3. Progressively reduce to 4-bit if needed
+# Avoid starting at 32-bit with quantization enabled - defeats the purpose!
 
 # Training Settings
 num_epochs: 100                     # Faster training for prototyping
@@ -29,7 +36,7 @@ num_workers: 0                      # Use 0 to avoid multiprocessing with h5py
 # Optimizer Settings
 learning_rate: 0.0002               # Higher LR for faster convergence
 weight_decay: 0.0001
-lr_milestones: [50, 75]
+lr_milestones: [50, 75, 100]
 lr_gamma: 0.5
 
 # Loss Weights
@@ -40,7 +47,7 @@ quant_weight: 0.0001
 target_spike_rate: 0.1
 
 # Data Settings
-data_root: '../blink_sim/output/train_boy1'  # Path to dataset root directory
+data_root: '../blink_sim/output/train_set_0' # Path to dataset root directory
 camera_size: [320, 320]
 use_events: true
 crop_size: [320, 320]               # Smaller crops for speed

@@ -319,7 +319,9 @@ class SpikingConvBlock(nn.Module):
         threshold=1.0,
         alpha=10.0,
         use_bn=False,
-        groups=1
+        groups=1,
+        quantize=False,
+        bit_width=8
     ):
         super().__init__()
         self.conv = nn.Conv2d(in_ch, out_ch, kernel_size=k, stride=s, padding=p, groups=groups, bias=not use_bn)
@@ -327,11 +329,25 @@ class SpikingConvBlock(nn.Module):
         self.tau = tau
         self.threshold = threshold
         self.alpha = alpha
+        
+        # Quantization support
+        self.quantize = quantize
+        self.bit_width = bit_width
+        if quantize:
+            from ..quantization import QuantizationAwareLayer
+            self.quant_layer = QuantizationAwareLayer(bit_width=bit_width)
+        else:
+            self.quant_layer = None
 
     def forward(self, x, mem):
         x = self.conv(x)
         if self.bn is not None:
             x = self.bn(x)
+        
+        # Apply quantization if enabled
+        if self.quantize and self.quant_layer is not None:
+            x = self.quant_layer(x)
+        
         spk, mem = lif_update(mem, x, tau=self.tau, threshold=self.threshold, alpha=self.alpha)
         return spk, mem
 

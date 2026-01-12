@@ -26,24 +26,27 @@ class StraightThroughEstimator(torch.autograd.Function):
 
 class QuantizationAwareLayer(nn.Module):
     """
-    Quantization-aware layer that can be inserted into the network
+    Fake Quantization layer for Quantization-Aware Training
+    
+    Uses exponential moving average (EMA) to track activation statistics
+    during training, similar to PyTorch's FakeQuantize.
     
     Args:
         bit_width: Number of bits for quantization (1 for binary)
         symmetric: Use symmetric quantization around zero
-        per_channel: Quantize per channel vs per tensor
+        ema_decay: Decay factor for exponential moving average (0.9-0.999)
     """
     def __init__(
         self,
         bit_width: int = 8,
         symmetric: bool = True,
-        per_channel: bool = False
+        ema_decay: float = 0.99
     ):
         super().__init__()
         
         self.bit_width = bit_width
         self.symmetric = symmetric
-        self.per_channel = per_channel
+        self.ema_decay = ema_decay
         
         # Quantization levels
         if symmetric:
@@ -53,46 +56,47 @@ class QuantizationAwareLayer(nn.Module):
             self.qmin = 0
             self.qmax = 2 ** bit_width - 1
         
-        # Learnable scale and zero-point
-        self.register_buffer('scale', torch.tensor(1.0))
-        self.register_buffer('zero_point', torch.tensor(0.0))
-        self.calibrated = False
+        # Running statistics for scale/zero-point (like BatchNorm)
+        self.register_buffer('running_min', torch.tensor(0.0))
+        self.register_buffer('running_max', torch.tensor(1.0))
+        self.register_buffer('num_batches_tracked', torch.tensor(0))
         
-    def calibrate(self, x: torch.Tensor):
-        """Calibrate quantization parameters based on input statistics"""
-        if self.calibrated:
-            return
-        
-        with torch.no_grad():
-            if self.symmetric:
-                max_val = torch.max(torch.abs(x))
-                self.scale = max_val / (2 ** (self.bit_width - 1) - 1)
-                self.zero_point = torch.tensor(0.0, device=x.device)
-            else:
-                min_val = torch.min(x)
-                max_val = torch.max(x)
-                self.scale = (max_val - min_val) / (2 ** self.bit_width - 1)
-                self.zero_point = min_val
-        
-        self.calibrated = True
-    
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply quantization-aware forward pass"""
+        """Apply fake quantization with EMA statistics tracking"""
         
-        # Calibrate on first pass
-        if not self.calibrated and self.training:
-            self.calibrate(x)
+        if self.training:
+            # Update running statistics using EMA
+            with torch.no_grad():
+                min_val = x.min()
+                max_val = x.max()
+                
+                if self.num_batches_tracked == 0:
+                    self.running_min = min_val
+                    self.running_max = max_val
+                else:
+                    self.running_min = self.ema_decay * self.running_min + (1 - self.ema_decay) * min_val
+                    self.running_max = self.ema_decay * self.running_max + (1 - self.ema_decay) * max_val
+                
+                self.num_batches_tracked += 1
         
-        # Quantize
-        if self.scale > 0:
-            x_q = (x - self.zero_point) / self.scale
+        # Use running statistics for quantization
+        if self.symmetric:
+            max_abs = torch.max(torch.abs(self.running_min), torch.abs(self.running_max))
+            scale = max_abs / (2 ** (self.bit_width - 1) - 1)
+            zero_point = 0.0
+        else:
+            scale = (self.running_max - self.running_min) / (2 ** self.bit_width - 1)
+            zero_point = self.running_min
+        
+        # Fake quantization: quantize then dequantize
+        if scale > 1e-8:  # Avoid division by zero
+            x_q = (x - zero_point) / scale
             x_q = torch.clamp(x_q, self.qmin, self.qmax)
             x_q = StraightThroughEstimator.apply(x_q)
-            x_dequant = x_q * self.scale + self.zero_point
+            x_dequant = x_q * scale + zero_point
+            return x_dequant
         else:
-            x_dequant = x
-        
-        return x_dequant
+            return x
 
 
 class BinaryQuantizer(nn.Module):
@@ -154,117 +158,3 @@ class BinaryWeight(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         return grad_output
-
-
-def quantize_weights(weights: torch.Tensor, bit_width: int = 8) -> torch.Tensor:
-    """
-    Quantize weight tensor
-    
-    Args:
-        weights: Weight tensor to quantize
-        bit_width: Number of bits (1 for binary)
-        
-    Returns:
-        Quantized weights
-    """
-    if bit_width == 1:
-        # Binary weights
-        return BinaryWeight.apply(weights)
-    else:
-        # Multi-bit quantization
-        qmin = -(2 ** (bit_width - 1))
-        qmax = 2 ** (bit_width - 1) - 1
-        
-        scale = torch.max(torch.abs(weights)) / (2 ** (bit_width - 1) - 1)
-        
-        if scale > 0:
-            w_q = weights / scale
-            w_q = torch.clamp(w_q, qmin, qmax)
-            w_q = StraightThroughEstimator.apply(w_q)
-            w_dequant = w_q * scale
-            return w_dequant
-        else:
-            return weights
-
-
-def quantize_activations(activations: torch.Tensor, bit_width: int = 8) -> torch.Tensor:
-    """
-    Quantize activation tensor
-    
-    Args:
-        activations: Activation tensor to quantize
-        bit_width: Number of bits (1 for binary)
-        
-    Returns:
-        Quantized activations
-    """
-    if bit_width == 1:
-        # Binary activations
-        return BinaryActivation.apply(activations)
-    else:
-        # Multi-bit quantization
-        qmin = 0
-        qmax = 2 ** bit_width - 1
-        
-        min_val = torch.min(activations)
-        max_val = torch.max(activations)
-        scale = (max_val - min_val) / (2 ** bit_width - 1)
-        
-        if scale > 0:
-            a_q = (activations - min_val) / scale
-            a_q = torch.clamp(a_q, qmin, qmax)
-            a_q = StraightThroughEstimator.apply(a_q)
-            a_dequant = a_q * scale + min_val
-            return a_dequant
-        else:
-            return activations
-
-
-class QuantizedConv2d(nn.Conv2d):
-    """
-    Quantized Conv2d layer
-    Automatically quantizes weights during forward pass
-    """
-    def __init__(self, *args, bit_width: int = 8, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.bit_width = bit_width
-    
-    def forward(self, input):
-        # Quantize weights
-        if self.training or self.bit_width < 32:
-            quantized_weight = quantize_weights(self.weight, self.bit_width)
-        else:
-            quantized_weight = self.weight
-        
-        # Standard conv2d operation with quantized weights
-        return F.conv2d(
-            input, quantized_weight, self.bias,
-            self.stride, self.padding, self.dilation, self.groups
-        )
-
-
-class PACT(nn.Module):
-    """
-    Parameterized Clipping Activation (PACT)
-    Learnable clipping threshold for better quantization
-    
-    Paper: "PACT: Parameterized Clipping Activation for Quantized Neural Networks"
-    """
-    def __init__(self, init_clip: float = 6.0, bit_width: int = 8):
-        super().__init__()
-        self.clip_val = nn.Parameter(torch.tensor(init_clip))
-        self.bit_width = bit_width
-    
-    def forward(self, x):
-        # Clip to learnable range
-        x_clipped = torch.clamp(x, 0, self.clip_val)
-        
-        # Quantize
-        if self.training:
-            scale = self.clip_val / (2 ** self.bit_width - 1)
-            x_q = x_clipped / scale
-            x_q = StraightThroughEstimator.apply(x_q)
-            x_dequant = x_q * scale
-            return x_dequant
-        else:
-            return x_clipped

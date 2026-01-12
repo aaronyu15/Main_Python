@@ -53,7 +53,10 @@ def load_model_from_checkpoint(
             tau=config.get('tau', 2.0),
             threshold=config.get('threshold', 1.0),
             alpha=config.get('alpha', 10.0),
-            use_bn=config.get('use_bn', False)
+            use_bn=config.get('use_bn', False),
+            quantize=config.get('quantization_enabled', False),
+            bit_width=config.get('initial_bit_width', 8),
+            binarize=config.get('binarize', False)
         )
     else:
         # SpikingFlowNet and SpikingFlowNetLite both use SpikingFlowNetLite
@@ -233,17 +236,25 @@ def visualize_flow_comparison(
     
     # Row 1: Input visualization
     # Show events by polarity (red=positive, blue=negative)
-    event_sum = input_events.sum(axis=0)
-    h, w = event_sum.shape
+    # Handle both old [num_bins, H, W] and new [num_bins, 2, H, W] formats
+    if input_events.ndim == 4:  # [num_bins, 2, H, W] - polarity-separated
+        # Sum across time bins: [num_bins, 2, H, W] -> [2, H, W]
+        event_sum = input_events.sum(axis=0)  # [2, H, W]
+        pos_events = event_sum[0]  # Positive events
+        neg_events = event_sum[1]  # Negative events
+    else:  # [num_bins, H, W] - old voxel grid format
+        event_sum = input_events.sum(axis=0)  # [H, W]
+        pos_events = np.maximum(event_sum, 0)
+        neg_events = np.maximum(-event_sum, 0)
+    
+    h, w = pos_events.shape
     event_rgb = np.zeros((h, w, 3), dtype=np.float32)
     
     # Positive events -> red channel
-    pos_events = np.maximum(event_sum, 0)
     if pos_events.max() > 0:
         event_rgb[:, :, 0] = pos_events / (pos_events.max() * 0.5)
     
     # Negative events -> blue channel
-    neg_events = np.maximum(-event_sum, 0)
     if neg_events.max() > 0:
         event_rgb[:, :, 2] = neg_events / (neg_events.max() * 0.5)
     
@@ -363,20 +374,26 @@ def create_flow_animation(
             ax.clear()
         
         # Input events - visualize by polarity (red=positive, blue=negative)
-        # Sum across time bins to get total event activity
-        event_sum = input_events.sum(axis=0)  # [H, W]
+        # Handle both old [num_bins, H, W] and new [num_bins, 2, H, W] formats
+        if input_events.ndim == 4:  # [num_bins, 2, H, W] - polarity-separated
+            # Sum across time bins: [num_bins, 2, H, W] -> [2, H, W]
+            event_sum = input_events.sum(axis=0)  # [2, H, W]
+            pos_events = event_sum[0]  # Positive events
+            neg_events = event_sum[1]  # Negative events
+        else:  # [num_bins, H, W] - old voxel grid format
+            event_sum = input_events.sum(axis=0)  # [H, W]
+            pos_events = np.maximum(event_sum, 0)
+            neg_events = np.maximum(-event_sum, 0)
         
         # Create RGB image: red for positive, blue for negative
-        h, w = event_sum.shape
+        h, w = pos_events.shape
         event_rgb = np.zeros((h, w, 3), dtype=np.float32)
         
         # Positive events -> red channel
-        pos_events = np.maximum(event_sum, 0)
         if pos_events.max() > 0:
             event_rgb[:, :, 0] = pos_events / (pos_events.max() * 0.5)  # Enhanced brightness
         
         # Negative events -> blue channel
-        neg_events = np.maximum(-event_sum, 0)
         if neg_events.max() > 0:
             event_rgb[:, :, 2] = neg_events / (neg_events.max() * 0.5)  # Enhanced brightness
         

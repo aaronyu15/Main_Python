@@ -2,7 +2,7 @@
 
 from .logger import Logger
 from .metrics import compute_metrics, calculate_epe, calculate_outliers
-from .visualization import visualize_flow, save_flow_image
+from .visualization import visualize_flow, save_flow_image, plot_flow_comparison
 
 __all__ = [
     'Logger',
@@ -10,5 +10,7 @@ __all__ = [
     'calculate_epe',
     'calculate_outliers',
     'visualize_flow',
-    'save_flow_image'
+    'save_flow_image',
+    'plot_flow_comparison',
+
 ]

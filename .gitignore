@@ -15,6 +15,7 @@ env/
 *~
 
 # Training outputs
+output/
 checkpoints/
 logs/
 results/
