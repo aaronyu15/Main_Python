@@ -39,9 +39,3 @@ opencv-python>=4.5.0
 pytest>=7.0.0
 black>=22.0.0
 flake8>=4.0.0
-
-# FPGA deployment tools (install separately based on your FPGA vendor)
-# These are just placeholders - actual tools depend on target FPGA
-# vivado (Xilinx)
-# quartus (Intel/Altera)
-# brevitas (for quantization - optional advanced tool)
