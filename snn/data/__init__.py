@@ -5,7 +5,6 @@ from .data_utils import load_events, load_flow, augment_data
 
 __all__ = [
     'OpticalFlowDataset',
-    'EventDataset',
     'load_events',
     'load_flow',
     'augment_data'
