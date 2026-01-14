@@ -159,7 +159,7 @@ def test_gpu_computation():
     
     if not torch.cuda.is_available():
         print("⚠ CUDA not available - skipping GPU test")
-        return True
+        return False
     
     try:
         device = torch.device('cuda')
