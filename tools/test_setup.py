@@ -153,6 +153,131 @@ def test_data_loading():
         return True  # Don't fail if dataset isn't available
 
 
+def test_gpu_computation():
+    """Test GPU computation with various operations"""
+    print("\nTesting GPU computation...")
+    
+    if not torch.cuda.is_available():
+        print("⚠ CUDA not available - skipping GPU test")
+        return True
+    
+    try:
+        device = torch.device('cuda')
+        print(f"  Using device: {torch.cuda.get_device_name(0)}")
+        print(f"  Memory allocated: {torch.cuda.memory_allocated(0) / 1024**2:.2f} MB")
+        
+        # Test 1: Basic matrix operations
+        print("\n  Test 1: Matrix multiplication...")
+        size = 2048
+        a = torch.randn(size, size, device=device)
+        b = torch.randn(size, size, device=device)
+        
+        # Warm up
+        c = torch.matmul(a, b)
+        torch.cuda.synchronize()
+        
+        # Timed calculation
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        
+        start.record()
+        c = torch.matmul(a, b)
+        end.record()
+        torch.cuda.synchronize()
+        
+        elapsed_ms = start.elapsed_time(end)
+        print(f"    Matrix mult ({size}x{size}): {elapsed_ms:.2f} ms")
+        
+        # Test 2: Convolution operations
+        print("\n  Test 2: Convolution operations...")
+        batch_size = 8
+        in_channels = 64
+        out_channels = 128
+        h, w = 256, 256
+        
+        conv_input = torch.randn(batch_size, in_channels, h, w, device=device)
+        conv_layer = torch.nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1).to(device)
+        
+        start.record()
+        conv_output = conv_layer(conv_input)
+        end.record()
+        torch.cuda.synchronize()
+        
+        elapsed_ms = start.elapsed_time(end)
+        print(f"    Conv2d ({batch_size}x{in_channels}x{h}x{w}): {elapsed_ms:.2f} ms")
+        print(f"    Output shape: {conv_output.shape}")
+        
+        # Test 3: Reduction operations
+        print("\n  Test 3: Reduction operations...")
+        large_tensor = torch.randn(10000, 10000, device=device)
+        
+        start.record()
+        mean_val = large_tensor.mean()
+        std_val = large_tensor.std()
+        max_val = large_tensor.max()
+        min_val = large_tensor.min()
+        end.record()
+        torch.cuda.synchronize()
+        
+        elapsed_ms = start.elapsed_time(end)
+        print(f"    Reductions (mean/std/max/min): {elapsed_ms:.2f} ms")
+        print(f"    Mean: {mean_val.item():.4f}, Std: {std_val.item():.4f}")
+        
+        # Test 4: Element-wise operations
+        print("\n  Test 4: Element-wise operations...")
+        x = torch.randn(100, 100, 100, device=device)
+        
+        start.record()
+        y = torch.relu(x)
+        y = torch.sigmoid(y)
+        y = y * 2.0 + 1.0
+        end.record()
+        torch.cuda.synchronize()
+        
+        elapsed_ms = start.elapsed_time(end)
+        print(f"    Element-wise ops: {elapsed_ms:.2f} ms")
+        
+        # Test 5: GPU-CPU transfer
+        print("\n  Test 5: Data transfer...")
+        gpu_tensor = torch.randn(100, 100, device=device)
+        
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        
+        start_event.record()
+        cpu_tensor = gpu_tensor.cpu()
+        end_event.record()
+        torch.cuda.synchronize()
+        
+        elapsed_ms = start_event.elapsed_time(end_event)
+        print(f"    GPU->CPU transfer: {elapsed_ms:.2f} ms")
+        
+        start_event.record()
+        back_to_gpu = cpu_tensor.to(device)
+        end_event.record()
+        torch.cuda.synchronize()
+        
+        elapsed_ms = start_event.elapsed_time(end_event)
+        print(f"    CPU->GPU transfer: {elapsed_ms:.2f} ms")
+        
+        # Memory summary
+        print(f"\n  Final GPU memory allocated: {torch.cuda.memory_allocated(0) / 1024**2:.2f} MB")
+        print(f"  Max GPU memory allocated: {torch.cuda.max_memory_allocated(0) / 1024**2:.2f} MB")
+        
+        # Cleanup
+        del a, b, c, conv_input, conv_layer, conv_output, large_tensor, x, y, gpu_tensor
+        torch.cuda.empty_cache()
+        
+        print("✓ GPU computation test successful!")
+        return True
+        
+    except Exception as e:
+        print(f"✗ GPU computation test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def test_config_loading():
     """Test configuration loading"""
     print("\nTesting configuration loading...")
@@ -198,6 +323,7 @@ def main():
         ("Model Creation", test_model_creation),
         ("Forward Pass", test_forward_pass),
         ("Quantization", test_quantization),
+        ("GPU Computation", test_gpu_computation),
         ("Data Loading", test_data_loading),
         ("Config Loading", test_config_loading)
     ]
