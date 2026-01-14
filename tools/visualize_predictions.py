@@ -16,7 +16,7 @@ import yaml
 
 import sys 
 sys.path.insert(0, '..')
-from snn.models import SpikingFlowNetLite, EventSNNFlowNetLite
+from snn.models import SpikingFlowNetLite, EventSNNFlowNetLite, EventSNNFlowNetLiteV2
 from snn.data import OpticalFlowDataset
 from snn.utils.visualization import visualize_flow, flow_to_color
 
@@ -49,6 +49,17 @@ def load_model_from_checkpoint(
     
     if model_type == 'EventSNNFlowNetLite':
         model = EventSNNFlowNetLite(
+            base_ch=config.get('base_ch', 32),
+            tau=config.get('tau', 2.0),
+            threshold=config.get('threshold', 1.0),
+            alpha=config.get('alpha', 10.0),
+            use_bn=config.get('use_bn', False),
+            quantize=config.get('quantization_enabled', False),
+            bit_width=config.get('initial_bit_width', 8),
+            binarize=config.get('binarize', False)
+        )
+    elif model_type == 'EventSNNFlowNetLiteV2':
+        model = EventSNNFlowNetLiteV2(
             base_ch=config.get('base_ch', 32),
             tau=config.get('tau', 2.0),
             threshold=config.get('threshold', 1.0),

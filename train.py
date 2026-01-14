@@ -8,7 +8,7 @@ import torch
 from pathlib import Path
 from torch.utils.data import DataLoader
 
-from snn.models import SpikingFlowNetLite, EventSNNFlowNetLite
+from snn.models import SpikingFlowNetLite, EventSNNFlowNetLite, EventSNNFlowNetLiteV2
 from snn.data import OpticalFlowDataset
 from snn.data.data_utils import Compose, RandomHorizontalFlip, RandomCrop, Normalize
 from snn.training import SNNTrainer
@@ -47,6 +47,17 @@ def build_model(config: dict) -> torch.nn.Module:
     if model_type == 'EventSNNFlowNetLite':
         # EventSNNFlowNetLite uses different parameters
         model = EventSNNFlowNetLite(
+            base_ch=config.get('base_ch', 32),
+            tau=config.get('tau', 2.0),
+            threshold=config.get('threshold', 1.0),
+            alpha=config.get('alpha', 10.0),
+            use_bn=config.get('use_bn', False),
+            quantize=config.get('quantization_enabled', False),
+            bit_width=config.get('initial_bit_width', 8),
+            binarize=config.get('binarize', False)
+        )
+    elif model_type == 'EventSNNFlowNetLiteV2':
+        model = EventSNNFlowNetLiteV2(
             base_ch=config.get('base_ch', 32),
             tau=config.get('tau', 2.0),
             threshold=config.get('threshold', 1.0),

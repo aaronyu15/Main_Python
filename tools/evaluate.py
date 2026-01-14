@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 import sys 
 sys.path.insert(0, '..')
-from snn.models import SpikingFlowNetLite, EventSNNFlowNetLite
+from snn.models import SpikingFlowNetLite, EventSNNFlowNetLite, EventSNNFlowNetLiteV2
 from snn.data import OpticalFlowDataset
 from snn.utils import compute_metrics, visualize_flow, plot_flow_comparison, save_flow_image
 
@@ -24,8 +24,6 @@ def parse_args():
                       help='Path to model checkpoint')
     parser.add_argument('--data-root', type=str, default='../blink_sim/output',
                       help='Root directory for dataset')
-    parser.add_argument('--split', type=str, default='val',
-                      help='Dataset split to evaluate (train/val/test)')
     parser.add_argument('--output-dir', type=str, default='./results',
                       help='Directory to save results')
     parser.add_argument('--save-visualizations', action='store_true',
@@ -50,6 +48,17 @@ def load_model(checkpoint_path: str, device: str):
     
     if model_type == 'EventSNNFlowNetLite':
         model = EventSNNFlowNetLite(
+            base_ch=config.get('base_ch', 32),
+            tau=config.get('tau', 2.0),
+            threshold=config.get('threshold', 1.0),
+            alpha=config.get('alpha', 10.0),
+            use_bn=config.get('use_bn', False),
+            quantize=config.get('quantization_enabled', False),
+            bit_width=config.get('initial_bit_width', 8),
+            binarize=config.get('binarize', False)
+        )
+    elif model_type == 'EventSNNFlowNetLiteV2':
+        model = EventSNNFlowNetLiteV2(
             base_ch=config.get('base_ch', 32),
             tau=config.get('tau', 2.0),
             threshold=config.get('threshold', 1.0),
@@ -102,11 +111,11 @@ def evaluate(args):
     # Build dataset
     dataset = OpticalFlowDataset(
         data_root=args.data_root,
-        split=args.split,
+        split=None,
         transform=None,
         use_events=config.get('use_events', True),
         num_bins=config.get('in_channels', 5),
-        crop_size=config.get('crop_size', (256, 256)),
+        crop_size=config.get('crop_size', (320, 320)),
         max_samples=args.num_samples
     )
     

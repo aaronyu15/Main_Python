@@ -17,7 +17,7 @@ use_bn: false                       # Use batch normalization in spiking blocks
 
 # Quantization Settings (now supported by EventSNNFlowNetLite)
 # Note: Start with quantization OFF for baseline, or use 8-bit as starting point
-quantization_enabled: true        # Enable quantization-aware training
+quantization_enabled: false        # Enable quantization-aware training
 initial_bit_width: 8               # Bit width for quantization (8 is a good starting point)
 binarize: false                    # Use binary (1-bit) quantization
 
@@ -29,9 +29,9 @@ binarize: false                    # Use binary (1-bit) quantization
 
 # Training Settings
 num_epochs: 100                     # Faster training for prototyping
-batch_size: 2                       # Larger batch for small model
-val_batch_size: 2
-num_workers: 0                      # Use 0 to avoid multiprocessing with h5py
+batch_size: 64                      # Larger batch for small model
+val_batch_size: 32
+num_workers: 32                     # Use 0 to avoid multiprocessing with h5py
 
 # Optimizer Settings
 learning_rate: 0.0002               # Higher LR for faster convergence
@@ -47,7 +47,7 @@ quant_weight: 0.0001
 target_spike_rate: 0.1
 
 # Data Settings
-data_root: '../blink_sim/output/train' # Path to dataset root directory
+data_root: '../train_set' # Path to dataset root directory
 camera_size: [320, 320]
 use_events: true
 crop_size: [320, 320]               # Smaller crops for speed
