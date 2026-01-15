@@ -183,7 +183,6 @@ def evaluate(args):
     print("\n" + "="*50)
     print("EVALUATION RESULTS")
     print("="*50)
-    print(f"Dataset: {args.split}")
     print(f"Number of samples: {len(all_metrics)}")
     print(f"\nAverage Metrics:")
     print(f"  EPE: {avg_metrics['epe']:.4f} ± {avg_metrics['epe_std']:.4f}")
@@ -192,12 +191,11 @@ def evaluate(args):
     print("="*50)
     
     # Save results to file
-    results_file = output_dir / f'results_{args.split}.txt'
+    results_file = output_dir / f'results.txt'
     with open(results_file, 'w') as f:
         f.write("EVALUATION RESULTS\n")
         f.write("="*50 + "\n")
         f.write(f"Checkpoint: {args.checkpoint}\n")
-        f.write(f"Dataset: {args.split}\n")
         f.write(f"Number of samples: {len(all_metrics)}\n")
         f.write(f"\nAverage Metrics:\n")
         f.write(f"  EPE: {avg_metrics['epe']:.4f} ± {avg_metrics['epe_std']:.4f}\n")
@@ -212,7 +210,7 @@ def evaluate(args):
     print(f"\nResults saved to {results_file}")
     
     # Save metrics as numpy array
-    metrics_file = output_dir / f'metrics_{args.split}.npy'
+    metrics_file = output_dir / f'metrics.npy'
     np.save(metrics_file, all_metrics)
     print(f"Metrics saved to {metrics_file}")
 

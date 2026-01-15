@@ -2,7 +2,7 @@
 # Newer architecture with temporal bin processing and polarity-separated inputs
 
 # Model Configuration
-model_type: 'EventSNNFlowNetLiteV2'   # Event-aware SNN architecture
+model_type: 'EventSNNFlowNetLite'   # Event-aware SNN architecture
 in_channels: 2                       # Polarity channels (positive/negative events)
 num_bins: 5                         # Event temporal bins - controls temporal history length
                                     # 5 bins = 1 frame period (reference)
@@ -17,7 +17,7 @@ use_bn: false                       # Use batch normalization in spiking blocks
 
 # Quantization Settings (now supported by EventSNNFlowNetLite)
 # Note: Start with quantization OFF for baseline, or use 8-bit as starting point
-quantization_enabled: true        # Enable quantization-aware training
+quantization_enabled: false        # Enable quantization-aware training
 initial_bit_width: 8               # Bit width for quantization (8 is a good starting point)
 binarize: false                    # Use binary (1-bit) quantization
 

@@ -492,7 +492,8 @@ def main():
     )
     parser.add_argument(
         '--create-animation',
-        action='store_true',
+        type=bool,
+        default=True,
         help='Create animation of multiple samples'
     )
     parser.add_argument(
