@@ -31,19 +31,15 @@ def test_model_creation():
     """Test model instantiation"""
     print("\nTesting model creation...")
     try:
-        from snn.models import SpikingFlowNetLite, EventSNNFlowNetLite
-        
-        # Test lite model
-        model_lite = SpikingFlowNetLite(
-            in_channels=5,
-            num_timesteps=10,
-            quantize=False
-        )
-        print(f"✓ SpikingFlowNetLite created - Parameters: {sum(p.numel() for p in model_lite.parameters()):,}")
+        from snn.models import EventSNNFlowNetLite, EventSNNFlowNetLiteV2
         
         # Test event-based model
         model_event = EventSNNFlowNetLite()
         print(f"✓ EventSNNFlowNetLite created - Parameters: {sum(p.numel() for p in model_event.parameters()):,}")
+
+        # Test event-based model
+        model_event = EventSNNFlowNetLiteV2()
+        print(f"✓ EventSNNFlowNetLiteV2 created - Parameters: {sum(p.numel() for p in model_event.parameters()):,}")
         
         return True
     except Exception as e:
@@ -55,7 +51,7 @@ def test_forward_pass():
     """Test forward pass through model"""
     print("\nTesting forward pass...")
     try:
-        from snn.models import SpikingFlowNetLite
+        from snn.models import EventSNNFlowNetLiteV2
 
         if not torch.cuda.is_available():
             print("⚠ CUDA not available - using CPU")
@@ -64,17 +60,15 @@ def test_forward_pass():
         print(f"  Using device: {device}")
         
         # Create model
-        model = SpikingFlowNetLite(
-            in_channels=5,
-            num_timesteps=10,
-            quantize=False
+        model = EventSNNFlowNetLiteV2(
+            base_ch=32,
         ).to(device)
         model.eval()
         
         # Create dummy input
         batch_size = 2
         height, width = 128, 128
-        x = torch.randn(batch_size, 5, height, width).to(device)
+        x = torch.randn(batch_size, 5, 2, height, width).to(device)
         
         # Forward pass
         with torch.no_grad():
