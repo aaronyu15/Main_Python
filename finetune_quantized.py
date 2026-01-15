@@ -115,24 +115,62 @@ def load_pretrained_weights(model: torch.nn.Module, checkpoint_path: str,
     else:
         pretrained_state_dict = checkpoint
     
+    # Get model state dict to compare
+    model_state = model.state_dict()
+    total_model_keys = len(model_state)
+    total_checkpoint_keys = len(pretrained_state_dict)
+    
+    print(f"  Model expects {total_model_keys} parameters")
+    print(f"  Checkpoint contains {total_checkpoint_keys} parameters")
+    
     # Load weights (non-strict to allow quantization layer mismatches)
-    # The quantization layers (quant_layer.*) won't be in the pretrained model
-    # but that's okay - they'll be initialized randomly
     missing_keys, unexpected_keys = model.load_state_dict(pretrained_state_dict, strict=strict)
     
     if not strict:
         # Filter out expected missing keys (quantization layers)
-        quant_missing = [k for k in missing_keys if 'quant_layer' in k]
-        other_missing = [k for k in missing_keys if 'quant_layer' not in k]
+        quant_missing = [k for k in missing_keys if 'act_quant' in k]
+        other_missing = [k for k in missing_keys if k not in quant_missing]
         
-        print(f"  ✓ Loaded pretrained weights")
-        print(f"  - Quantization layers initialized randomly: {len(quant_missing)} keys")
+        # Count successfully loaded keys
+        loaded_keys = total_model_keys - len(missing_keys)
+        
+        print(f"\n  Weight Loading Summary:")
+        print(f"  {'='*60}")
+        print(f"  ✓ Successfully loaded: {loaded_keys}/{total_model_keys} parameters")
+        print(f"  ↻ Quantization layers (initialized randomly): {len(quant_missing)}")
+        
+        if len(quant_missing) > 0:
+            # Show breakdown of quantization layers by type
+            running_min = len([k for k in quant_missing if 'running_min' in k])
+            running_max = len([k for k in quant_missing if 'running_max' in k])
+            num_batches = len([k for k in quant_missing if 'num_batches_tracked' in k])
+            print(f"      • Running statistics (min/max): {running_min + running_max} buffers")
+            print(f"      • Batch counters: {num_batches} buffers")
+            print(f"      These will be learned during quantization-aware training")
+        
         if other_missing:
-            print(f"  ⚠ Warning: Missing non-quantization keys: {len(other_missing)}")
-            for key in other_missing[:5]:  # Show first 5
-                print(f"      {key}")
+            print(f"\n  ⚠ WARNING: Missing non-quantization keys: {len(other_missing)}")
+            print(f"      This may indicate a model architecture mismatch!")
+            for key in other_missing[:10]:  # Show first 10
+                print(f"      • {key}")
+            if len(other_missing) > 10:
+                print(f"      ... and {len(other_missing) - 10} more")
+        
         if unexpected_keys:
-            print(f"  ⚠ Warning: Unexpected keys: {len(unexpected_keys)}")
+            print(f"\n  ⚠ WARNING: Unexpected keys in checkpoint: {len(unexpected_keys)}")
+            print(f"      These weights exist in checkpoint but not in model:")
+            for key in unexpected_keys[:10]:  # Show first 10
+                print(f"      • {key}")
+            if len(unexpected_keys) > 10:
+                print(f"      ... and {len(unexpected_keys) - 10} more")
+        
+        print(f"  {'='*60}")
+        
+        if len(other_missing) == 0 and len(unexpected_keys) == 0:
+            print(f"  ✓ All convolution weights transferred successfully!")
+            print(f"  ✓ Model is ready for quantization-aware fine-tuning")
+        else:
+            print(f"  ⚠ Please review warnings above before proceeding")
     
     return model
 
