@@ -82,19 +82,16 @@ class SpikingConvBlock(nn.Module):
         self.quantize = quantize
         self.bit_width = bit_width
         
-        if quantize:
-            # Use QuantizedConv2d that quantizes BOTH weights and activations
-            from ..quantization import QuantizedConv2d
-            self.conv = QuantizedConv2d(
-                in_ch, out_ch, kernel_size=k, stride=s, padding=p, 
-                groups=groups, bias=not use_bn,
-                bit_width=bit_width,
-                quantize_weights=True,
-                quantize_activations=True
-            )
-        else:
-            # Standard full-precision convolution
-            self.conv = nn.Conv2d(in_ch, out_ch, kernel_size=k, stride=s, padding=p, groups=groups, bias=not use_bn)
+        # Always use QuantizedConv2d for consistent structure
+        # When quantize=False, it acts as a standard conv
+        from ..quantization import QuantizedConv2d
+        self.conv = QuantizedConv2d(
+            in_ch, out_ch, kernel_size=k, stride=s, padding=p, 
+            groups=groups, bias=not use_bn,
+            bit_width=bit_width,
+            quantize_weights=quantize,
+            quantize_activations=quantize
+        )
         
         self.bn = nn.BatchNorm2d(out_ch) if use_bn else None
         self.tau = tau

@@ -242,11 +242,12 @@ class QuantizedConv2d(nn.Module):
             groups=groups, bias=bias
         )
         
-        # Activation quantization layer
+        # Activation quantization layer (always present for consistent structure)
+        # When disabled, it acts as identity
         if quantize_activations:
             self.act_quant = QuantizationAwareLayer(bit_width=bit_width)
         else:
-            self.act_quant = None
+            self.act_quant = nn.Identity()
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -272,8 +273,7 @@ class QuantizedConv2d(nn.Module):
             groups=self.conv.groups
         )
         
-        # Quantize activations if enabled
-        if self.quantize_activations and self.act_quant is not None:
-            out = self.act_quant(out)
+        # Quantize activations (or pass through identity if disabled)
+        out = self.act_quant(out)
         
         return out

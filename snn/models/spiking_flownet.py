@@ -219,35 +219,29 @@ class EventSNNFlowNetLiteV2(nn.Module):
 
         # 1x1 alignment convs for ADD skips (cheap, great for hardware)
         # Align skip feature channels to decoder channels at each scale.
-        # NOW QUANTIZED for full hardware deployment!
-        if quantize:
-            from ..quantization import QuantizedConv2d
-            self.skip2_align = QuantizedConv2d(
-                base_ch * 2, base_ch * 2, kernel_size=1, bias=False,
-                bit_width=self.bit_width,
-                quantize_weights=True,
-                quantize_activations=True
-            )
-            self.skip1_align = QuantizedConv2d(
-                base_ch, base_ch, kernel_size=1, bias=False,
-                bit_width=self.bit_width,
-                quantize_weights=True,
-                quantize_activations=True
-            )
-            
-            # Flow head - QUANTIZED for hardware deployment
-            # This is the final prediction layer
-            self.flow_head = QuantizedConv2d(
-                base_ch, 2, kernel_size=3, padding=1,
-                bit_width=self.bit_width,
-                quantize_weights=True,
-                quantize_activations=True
-            )
-        else:
-            # Full precision versions
-            self.skip2_align = nn.Conv2d(base_ch * 2, base_ch * 2, kernel_size=1, bias=False)
-            self.skip1_align = nn.Conv2d(base_ch, base_ch, kernel_size=1, bias=False)
-            self.flow_head = nn.Conv2d(base_ch, 2, kernel_size=3, padding=1)
+        # Always use QuantizedConv2d for consistent structure (quantization can be disabled)
+        from ..quantization import QuantizedConv2d
+        self.skip2_align = QuantizedConv2d(
+            base_ch * 2, base_ch * 2, kernel_size=1, bias=False,
+            bit_width=self.bit_width,
+            quantize_weights=quantize,
+            quantize_activations=quantize
+        )
+        self.skip1_align = QuantizedConv2d(
+            base_ch, base_ch, kernel_size=1, bias=False,
+            bit_width=self.bit_width,
+            quantize_weights=quantize,
+            quantize_activations=quantize
+        )
+        
+        # Flow head - final prediction layer
+        # Always use QuantizedConv2d for consistent structure
+        self.flow_head = QuantizedConv2d(
+            base_ch, 2, kernel_size=3, padding=1,
+            bit_width=self.bit_width,
+            quantize_weights=quantize,
+            quantize_activations=quantize
+        )
 
         # Power-of-two scaling (shift-friendly); if None, scale=1
         self.flow_scale_pow2 = flow_scale_pow2
