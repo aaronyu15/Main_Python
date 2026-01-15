@@ -37,7 +37,7 @@ quant_weight: 0.01                  # Highest for binary
 target_spike_rate: 0.1
 
 # Data Settings
-data_root: '../train_set
+data_root: '../train_set'
 camera_size: [320, 320]
 use_events: true
 crop_size: [320, 320]
