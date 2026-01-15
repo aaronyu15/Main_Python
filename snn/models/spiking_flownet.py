@@ -6,88 +6,8 @@ Event-based/spike-based architecture for optical flow prediction
 import torch
 import torch.nn as nn
 from typing import Dict, List, Optional, Tuple
-from .snn_layers import SpikingConv2d, SpikingConvTranspose2d, SpikingResidualBlock, SpikingConvBlock
+from .snn_layers import SpikingConvBlock
 import torch.nn.functional as F
-
-class SpikingFlowNetLite(nn.Module):
-    """
-    Lightweight Spiking FlowNet for FPGA deployment
-    Reduced parameter count and depth for hardware efficiency
-    """
-    def __init__(
-        self,
-        in_channels: int = 2,
-        num_timesteps: int = 10,
-        tau: float = 2.0,
-        threshold: float = 1.0,
-        quantize: bool = True,
-        bit_width: int = 4,
-        binarize: bool = False
-    ):
-        super().__init__()
-        
-        self.num_timesteps = num_timesteps
-        self.bit_width = 1 if binarize else bit_width
-        
-        # Simplified encoder
-        self.enc1 = SpikingConv2d(in_channels, 32, 5, 2, 2, tau=tau, threshold=threshold, 
-                                  quantize=quantize, bit_width=self.bit_width)
-        self.enc2 = SpikingConv2d(32, 64, 3, 2, 1, tau=tau, threshold=threshold,
-                                  quantize=quantize, bit_width=self.bit_width)
-        self.enc3 = SpikingConv2d(64, 128, 3, 2, 1, tau=tau, threshold=threshold,
-                                  quantize=quantize, bit_width=self.bit_width)
-        
-        # Simplified decoder
-        self.dec3 = SpikingConvTranspose2d(128, 64, 4, 2, 1, tau=tau, threshold=threshold,
-                                           quantize=quantize, bit_width=self.bit_width)
-        self.dec2 = SpikingConvTranspose2d(128, 32, 4, 2, 1, tau=tau, threshold=threshold,
-                                           quantize=quantize, bit_width=self.bit_width)
-        
-        # Flow prediction
-        self.flow_head = nn.Conv2d(32, 2, 3, 1, 1)
-        
-        # Scaling factor to compensate for small spike accumulation values
-        # With binary spikes over num_timesteps, accumulated values are small
-        # This scales the output to match expected flow magnitudes
-        self.flow_scale = 20.0
-        
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """Forward pass for lightweight model"""
-        batch_size, _, height, width = x.shape
-        
-        # Initialize membrane potentials
-        mem_e1, mem_e2, mem_e3 = None, None, None
-        mem_d3, mem_d2 = None, None
-        
-        # Accumulators
-        acc_e1 = torch.zeros(batch_size, 32, height//2, width//2, device=x.device)
-        acc_e2 = torch.zeros(batch_size, 64, height//4, width//4, device=x.device)
-        acc_e3 = torch.zeros(batch_size, 128, height//8, width//8, device=x.device)
-        
-        # Run through timesteps
-        for t in range(self.num_timesteps):
-            s1, mem_e1 = self.enc1(x, mem_e1)
-            s2, mem_e2 = self.enc2(s1, mem_e2)
-            s3, mem_e3 = self.enc3(s2, mem_e3)
-            
-            acc_e1 += s1
-            acc_e2 += s2
-            acc_e3 += s3
-        
-        # Decode
-        d3, mem_d3 = self.dec3(acc_e3, mem_d3)
-        d3_cat = torch.cat([d3, acc_e2], dim=1)
-        
-        d2, mem_d2 = self.dec2(d3_cat, mem_d2)
-        
-        # Flow prediction with scaling
-        flow = self.flow_head(d2)
-        flow = flow * self.flow_scale  # Scale up to match expected flow magnitudes
-        flow = nn.functional.interpolate(flow, size=(height, width), mode='bilinear', align_corners=False)
-        
-        return {'flow': flow}
-
-
 
 # -------------------------
 # SNN-friendly Flow Net
@@ -193,14 +113,33 @@ class EventSNNFlowNetLite(nn.Module):
 # ----------------------------
 # Utilities: integer-friendly running mean
 # ----------------------------
-def running_mean_update(mean, x, t_idx: int):
+def running_mean_update(mean, x, t_idx: int, use_integer_approx: bool = False):
     """
     Online mean update: mean_t = mean_{t-1} + (x - mean_{t-1}) / (t_idx + 1)
     t_idx is 0-based.
+    
+    Args:
+        mean: Previous running mean (None on first iteration)
+        x: New value to incorporate
+        t_idx: Current timestep index (0-based)
+        use_integer_approx: Use bit-shift approximation instead of division
+                           (hardware-friendly but less accurate)
     """
     if mean is None:
         return x
-    return mean + (x - mean) / float(t_idx + 1)
+    
+    if use_integer_approx:
+        # Hardware-friendly approximation using bit shifts
+        # Instead of dividing by (t+1), use power-of-2 approximation
+        # This is less accurate but uses only shifts and adds
+        # Find nearest power of 2: 2^floor(log2(t+1))
+        import math
+        shift = max(0, int(math.log2(t_idx + 1)))
+        # mean_new ≈ mean + (x - mean) >> shift
+        return mean + ((x - mean) / (2 ** shift))
+    else:
+        # Standard floating-point division
+        return mean + (x - mean) / float(t_idx + 1)
 
 
 # ----------------------------
@@ -234,13 +173,15 @@ class EventSNNFlowNetLiteV2(nn.Module):
         bit_width=8,
         binarize=False,
         flow_scale_pow2=4,  # 2^4 = 16 default (shift-friendly). set to None to disable.
-        return_last_flow=True, 
+        return_last_flow=True,
+        hardware_mode=False,  # Enable hardware-friendly integer approximations
     ):
         super().__init__()
 
         self.quantize = quantize
         self.bit_width = 1 if binarize else bit_width
         self.return_last_flow = return_last_flow
+        self.hardware_mode = hardware_mode  # For bit-exact hardware matching
 
         # Encoder
         self.e1 = SpikingConvBlock(
@@ -278,11 +219,35 @@ class EventSNNFlowNetLiteV2(nn.Module):
 
         # 1x1 alignment convs for ADD skips (cheap, great for hardware)
         # Align skip feature channels to decoder channels at each scale.
-        self.skip2_align = nn.Conv2d(base_ch * 2, base_ch * 2, kernel_size=1, bias=False)
-        self.skip1_align = nn.Conv2d(base_ch,     base_ch,     kernel_size=1, bias=False)
-
-        # Flow head (non-spiking kept for stability)
-        self.flow_head = nn.Conv2d(base_ch, 2, kernel_size=3, padding=1)
+        # NOW QUANTIZED for full hardware deployment!
+        if quantize:
+            from ..quantization import QuantizedConv2d
+            self.skip2_align = QuantizedConv2d(
+                base_ch * 2, base_ch * 2, kernel_size=1, bias=False,
+                bit_width=self.bit_width,
+                quantize_weights=True,
+                quantize_activations=True
+            )
+            self.skip1_align = QuantizedConv2d(
+                base_ch, base_ch, kernel_size=1, bias=False,
+                bit_width=self.bit_width,
+                quantize_weights=True,
+                quantize_activations=True
+            )
+            
+            # Flow head - QUANTIZED for hardware deployment
+            # This is the final prediction layer
+            self.flow_head = QuantizedConv2d(
+                base_ch, 2, kernel_size=3, padding=1,
+                bit_width=self.bit_width,
+                quantize_weights=True,
+                quantize_activations=True
+            )
+        else:
+            # Full precision versions
+            self.skip2_align = nn.Conv2d(base_ch * 2, base_ch * 2, kernel_size=1, bias=False)
+            self.skip1_align = nn.Conv2d(base_ch, base_ch, kernel_size=1, bias=False)
+            self.flow_head = nn.Conv2d(base_ch, 2, kernel_size=3, padding=1)
 
         # Power-of-two scaling (shift-friendly); if None, scale=1
         self.flow_scale_pow2 = flow_scale_pow2
@@ -329,8 +294,9 @@ class EventSNNFlowNetLiteV2(nn.Module):
             s3, mem_e3 = self.e3(s2, mem_e3)   # [N, 4base,  H/8, W/8]
 
             # Update online means for skips (instead of accumulating all T then dividing)
-            mean_e1 = running_mean_update(mean_e1, s1, t)
-            mean_e2 = running_mean_update(mean_e2, s2, t)
+            # Use hardware_mode for integer approximation when needed
+            mean_e1 = running_mean_update(mean_e1, s1, t, use_integer_approx=self.hardware_mode)
+            mean_e2 = running_mean_update(mean_e2, s2, t, use_integer_approx=self.hardware_mode)
 
             # --- Decode timestep (streaming-friendly) ---
             d3 = F.interpolate(s3, scale_factor=2, mode="nearest")  # -> H/4
@@ -352,7 +318,7 @@ class EventSNNFlowNetLiteV2(nn.Module):
 
             flow_t = self._apply_flow_scale(self.flow_head(d1))
 
-            flow_mean = running_mean_update(flow_mean, flow_t, t)
+            flow_mean = running_mean_update(flow_mean, flow_t, t, use_integer_approx=self.hardware_mode)
 
             flow_last = flow_t  # keep last flow for option
 

@@ -8,7 +8,7 @@ import torch
 from pathlib import Path
 from torch.utils.data import DataLoader
 
-from snn.models import SpikingFlowNetLite, EventSNNFlowNetLite, EventSNNFlowNetLiteV2
+from snn.models import EventSNNFlowNetLite, EventSNNFlowNetLiteV2
 from snn.data import OpticalFlowDataset
 from snn.data.data_utils import Compose, RandomHorizontalFlip, RandomCrop, Normalize
 from snn.training import SNNTrainer
@@ -65,25 +65,9 @@ def build_model(config: dict) -> torch.nn.Module:
             use_bn=config.get('use_bn', False),
             quantize=config.get('quantization_enabled', False),
             bit_width=config.get('initial_bit_width', 8),
-            binarize=config.get('binarize', False)
+            binarize=config.get('binarize', False),
+            hardware_mode=config.get('hardware_mode', False)
         )
-    else:
-        # SpikingFlowNet and SpikingFlowNetLite use these parameters
-        # Note: SpikingFlowNet is treated as SpikingFlowNetLite (no separate full model exists)
-        model_params = {
-            'in_channels': config.get('in_channels', 5),  # Event voxel bins
-            'num_timesteps': config.get('num_timesteps', 10),
-            'tau': config.get('tau', 2.0),
-            'threshold': config.get('threshold', 1.0),
-            'quantize': config.get('quantization_enabled', False),
-            'bit_width': config.get('initial_bit_width', 32),
-            'binarize': config.get('binarize', False)
-        }
-        
-        if model_type in ['SpikingFlowNet', 'SpikingFlowNetLite']:
-            model = SpikingFlowNetLite(**model_params)
-        else:
-            raise ValueError(f"Unknown model type: {model_type}")
     
     return model
 

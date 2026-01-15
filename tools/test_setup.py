@@ -13,7 +13,7 @@ def test_imports():
     """Test that all modules can be imported"""
     print("Testing imports...")
     try:
-        from snn.models import SpikingFlowNetLite, EventSNNFlowNetLite, LIFNeuron
+        from snn.models import EventSNNFlowNetLite, EventSNNFlowNetLiteV2
         from snn.quantization import QuantizationAwareLayer, BinaryQuantizer
         from snn.data import OpticalFlowDataset
         from snn.training import SNNTrainer, flow_loss
@@ -56,19 +56,25 @@ def test_forward_pass():
     print("\nTesting forward pass...")
     try:
         from snn.models import SpikingFlowNetLite
+
+        if not torch.cuda.is_available():
+            print("⚠ CUDA not available - using CPU")
+    
+        device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        print(f"  Using device: {device}")
         
         # Create model
         model = SpikingFlowNetLite(
             in_channels=5,
             num_timesteps=10,
             quantize=False
-        )
+        ).to(device)
         model.eval()
         
         # Create dummy input
         batch_size = 2
         height, width = 128, 128
-        x = torch.randn(batch_size, 5, height, width)
+        x = torch.randn(batch_size, 5, height, width).to(device)
         
         # Forward pass
         with torch.no_grad():

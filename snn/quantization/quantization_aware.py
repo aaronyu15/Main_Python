@@ -158,3 +158,122 @@ class BinaryWeight(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         return grad_output
+
+
+class QuantizedWeight(torch.autograd.Function):
+    """
+    Multi-bit weight quantization with per-channel scaling
+    
+    Uses symmetric quantization with per-channel (per-filter) scaling
+    for better accuracy compared to per-tensor scaling.
+    """
+    @staticmethod
+    def forward(ctx, weight, bit_width):
+        # Per-channel (per-output-filter) quantization
+        # Shape: [out_ch, in_ch, kH, kW] -> scale per out_ch
+        
+        # Calculate per-channel max absolute value
+        # Need to flatten spatial and input channel dimensions for max
+        w_reshaped = weight.abs().view(weight.size(0), -1)  # [out_ch, in_ch*kH*kW]
+        max_abs = w_reshaped.max(dim=1, keepdim=True)[0].unsqueeze(-1).unsqueeze(-1)  # [out_ch, 1, 1, 1]
+        
+        # Symmetric quantization range
+        qmax = 2 ** (bit_width - 1) - 1
+        
+        # Calculate scale
+        scale = max_abs / qmax
+        scale = torch.clamp(scale, min=1e-8)  # Avoid division by zero
+        
+        # Quantize
+        w_q = weight / scale
+        w_q = torch.clamp(w_q, -qmax, qmax)
+        w_q = w_q.round()
+        
+        # Dequantize
+        w_dequant = w_q * scale
+        
+        return w_dequant
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        # Straight-through estimator
+        return grad_output, None
+
+
+class QuantizedConv2d(nn.Module):
+    """
+    Quantized Conv2d that quantizes both weights and activations
+    
+    This is the proper way to do QAT for hardware deployment:
+    - Weights are quantized during forward pass (stored as FP32, quantized on-the-fly)
+    - Activations are quantized after convolution
+    - Both use straight-through estimators for gradients
+    
+    Args:
+        Same as nn.Conv2d, plus:
+        bit_width: Bit-width for both weights and activations
+        quantize_weights: Enable weight quantization
+        quantize_activations: Enable activation quantization
+    """
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        stride: int = 1,
+        padding: int = 0,
+        dilation: int = 1,
+        groups: int = 1,
+        bias: bool = False,
+        bit_width: int = 8,
+        quantize_weights: bool = True,
+        quantize_activations: bool = True
+    ):
+        super().__init__()
+        
+        self.bit_width = bit_width
+        self.quantize_weights = quantize_weights
+        self.quantize_activations = quantize_activations
+        
+        # Standard conv layer (weights stored in FP32)
+        self.conv = nn.Conv2d(
+            in_channels, out_channels, kernel_size,
+            stride=stride, padding=padding, dilation=dilation,
+            groups=groups, bias=bias
+        )
+        
+        # Activation quantization layer
+        if quantize_activations:
+            self.act_quant = QuantizationAwareLayer(bit_width=bit_width)
+        else:
+            self.act_quant = None
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass with quantized weights and activations
+        """
+        # Quantize weights if enabled
+        if self.quantize_weights and self.bit_width > 1:
+            # Multi-bit weight quantization
+            weight = QuantizedWeight.apply(self.conv.weight, self.bit_width)
+        elif self.quantize_weights and self.bit_width == 1:
+            # Binary weight quantization
+            weight = BinaryWeight.apply(self.conv.weight)
+        else:
+            # No weight quantization
+            weight = self.conv.weight
+        
+        # Perform convolution with quantized weights
+        out = F.conv2d(
+            x, weight, self.conv.bias,
+            stride=self.conv.stride,
+            padding=self.conv.padding,
+            dilation=self.conv.dilation,
+            groups=self.conv.groups
+        )
+        
+        # Quantize activations if enabled
+        if self.quantize_activations and self.act_quant is not None:
+            out = self.act_quant(out)
+        
+        return out

@@ -82,7 +82,8 @@ def build_quantized_model(config: dict) -> torch.nn.Module:
         use_bn=config.get('use_bn', False),
         quantize=config.get('quantization_enabled', True),  # Enable quantization
         bit_width=config.get('initial_bit_width', 8),
-        binarize=config.get('binarize', False)
+        binarize=config.get('binarize', False),
+        hardware_mode=config.get('hardware_mode', False)
     )
     
     return model
