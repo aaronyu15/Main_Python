@@ -1,0 +1,54 @@
+# EventSNNFlowNetLiteV2 - 1-bit (Binary) Quantization Fine-tuning
+# Fine-tune from 2-bit checkpoint with binary quantization
+
+# Model Configuration
+model_type: 'EventSNNFlowNetLiteV2'
+in_channels: 2
+num_bins: 5
+num_timesteps: 5
+base_ch: 32
+tau: 2.0
+threshold: 1.0
+alpha: 10.0
+use_bn: false
+
+# Quantization Settings - Binary (1-bit) QAT
+quantization_enabled: true
+initial_bit_width: 1
+binarize: true
+
+# Training Settings - Fine-tuning
+num_epochs: 50                      # Most epochs for binary
+batch_size: 32
+val_batch_size: 32
+num_workers: 32
+
+# Optimizer Settings - Very low learning rate for binary
+learning_rate: 0.000005
+weight_decay: 0.0001
+lr_milestones: [25, 40]
+lr_gamma: 0.5
+
+# Loss Weights
+flow_weight: 1.0
+smooth_weight: 0.1
+sparsity_weight: 0.01
+quant_weight: 0.01                  # Highest for binary
+target_spike_rate: 0.1
+
+# Data Settings
+data_root: '../train_set
+camera_size: [320, 320]
+use_events: true
+crop_size: [320, 320]
+max_train_samples: null
+max_val_samples: null
+
+# Training Loop Settings
+grad_clip: 0.5
+log_interval: 10
+save_interval: 5
+
+# Hardware Settings
+target_hardware: 'FPGA'
+target_power_budget: 'low'
