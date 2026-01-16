@@ -66,7 +66,10 @@ def load_model(checkpoint_path: str, device: str):
             use_bn=config.get('use_bn', False),
             quantize=config.get('quantization_enabled', False),
             bit_width=config.get('initial_bit_width', 8),
-            binarize=config.get('binarize', False)
+            binarize=config.get('binarize', False),
+            output_bit_width=config.get('output_bit_width', 16),
+            first_layer_bit_width=config.get('first_layer_bit_width', 8),
+            mem_bit_width=config.get('mem_bit_width', 16)
         )
 
     

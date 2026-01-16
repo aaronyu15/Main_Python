@@ -36,24 +36,89 @@ def spike_fn(x, alpha=10.0):
     return SurrogateSpike.apply(x, alpha)
 
 
+def quantize_membrane(mem, bit_width=8, mem_range=2.0):
+    """
+    Quantize membrane potential for hardware implementation
+    
+    Args:
+        mem: Membrane potential tensor
+        bit_width: Number of bits for quantization
+        mem_range: Expected range of membrane values (±mem_range)
+    
+    Returns:
+        Quantized membrane potential
+    """
+    if bit_width >= 32:  # No quantization for high precision
+        return mem
+    
+    # Symmetric quantization around zero
+    qmax = 2 ** (bit_width - 1) - 1
+    scale = mem_range / qmax
+    
+    # Quantize
+    mem_q = mem / scale
+    mem_q = torch.clamp(mem_q, -qmax, qmax)
+    mem_q = mem_q.round()
+    
+    # Dequantize (STE for gradients)
+    mem_dequant = mem_q * scale
+    
+    return mem_dequant
+
+
 # -------------------------
 # LIF neuron update
 # -------------------------
-def lif_update(mem, inp, tau=2.0, threshold=1.0, alpha=10.0):
+def lif_update(mem, inp, tau=2.0, threshold=1.0, alpha=10.0, hardware_mode=False, 
+               quantize_mem=False, mem_bit_width=8):
     """
-    mem: membrane state
-    inp: input current (conv output)
+    LIF neuron membrane update with hardware-friendly option
+    
+    Args:
+        mem: membrane state
+        inp: input current (conv output)
+        tau: membrane time constant
+        threshold: spike threshold
+        alpha: surrogate gradient slope
+        hardware_mode: Use FPGA-friendly integer approximations
+        quantize_mem: Enable membrane potential quantization
+        mem_bit_width: Bit width for membrane quantization
+    
+    Hardware mode benefits:
+    - Uses bit-shift for decay (power-of-2 approximation)
+    - Avoids expensive exp() computation
+    - Integer-friendly operations for quantized networks
     """
     if mem is None:
         mem = torch.zeros_like(inp)
 
-    # simple discrete-time decay (hardware-friendly)
-    decay = torch.exp(torch.tensor(-1.0 / tau, device=inp.device, dtype=inp.dtype))
-    mem = mem * decay + inp
+    if hardware_mode:
+        # FPGA-friendly: Use bit-shift approximation for decay
+        # Instead of exp(-1/tau), use 1 - 1/2^k where k = round(log2(tau))
+        # For tau=2: decay ≈ 0.5 (right shift by 1)
+        # For tau=4: decay ≈ 0.75 (right shift by 2)
+        import math
+        shift = max(1, int(round(math.log2(tau))))
+        # mem_new = mem - mem/2^shift + inp = mem*(1 - 1/2^shift) + inp
+        mem = mem - (mem / (2 ** shift)) + inp
+    else:
+        # Standard floating-point decay (for training)
+        # Cache decay value to avoid recomputing exp every time
+        decay = torch.exp(torch.tensor(-1.0 / tau, device=inp.device, dtype=inp.dtype))
+        mem = mem * decay + inp
+
+    # Quantize membrane potential if enabled
+    if quantize_mem:
+        mem = quantize_membrane(mem, bit_width=mem_bit_width, mem_range=threshold * 2.0)
 
     spk = spike_fn(mem - threshold, alpha=alpha)
     # reset by subtracting threshold on spike (soft reset)
     mem = mem - spk * threshold
+    
+    # Quantize membrane again after reset if enabled
+    if quantize_mem:
+        mem = quantize_membrane(mem, bit_width=mem_bit_width, mem_range=threshold * 2.0)
+    
     return spk, mem
 
 
@@ -74,13 +139,17 @@ class SpikingConvBlock(nn.Module):
         use_bn=False,
         groups=1,
         quantize=False,
-        bit_width=8
+        bit_width=8,
+        hardware_mode=False,
+        mem_bit_width=16
     ):
         super().__init__()
         
         # Quantization support - use QuantizedConv2d for full quantization
         self.quantize = quantize
         self.bit_width = bit_width
+        self.hardware_mode = hardware_mode
+        self.mem_bit_width = mem_bit_width
         
         # Always use QuantizedConv2d for consistent structure
         # When quantize=False, it acts as a standard conv
@@ -106,7 +175,9 @@ class SpikingConvBlock(nn.Module):
         if self.bn is not None:
             x = self.bn(x)
         
-        # LIF neuron dynamics
-        spk, mem = lif_update(mem, x, tau=self.tau, threshold=self.threshold, alpha=self.alpha)
+        # LIF neuron dynamics (hardware-friendly in hardware_mode, with membrane quantization)
+        spk, mem = lif_update(mem, x, tau=self.tau, threshold=self.threshold, 
+                             alpha=self.alpha, hardware_mode=self.hardware_mode,
+                             quantize_mem=self.quantize, mem_bit_width=self.mem_bit_width)
         return spk, mem
 

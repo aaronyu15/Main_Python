@@ -175,6 +175,9 @@ class EventSNNFlowNetLiteV2(nn.Module):
         flow_scale_pow2=4,  # 2^4 = 16 default (shift-friendly). set to None to disable.
         return_last_flow=True,
         hardware_mode=False,  # Enable hardware-friendly integer approximations
+        output_bit_width=16,  # Bit width for output layer (higher precision for flow)
+        first_layer_bit_width=8,  # Bit width for first encoder layer (higher precision helps)
+        mem_bit_width=16,  # Bit width for membrane potential quantization
     ):
         super().__init__()
 
@@ -182,39 +185,48 @@ class EventSNNFlowNetLiteV2(nn.Module):
         self.bit_width = 1 if binarize else bit_width
         self.return_last_flow = return_last_flow
         self.hardware_mode = hardware_mode  # For bit-exact hardware matching
+        self.output_bit_width = output_bit_width  # Higher precision for output layer
+        self.first_layer_bit_width = first_layer_bit_width  # Higher precision for first layer
+        self.mem_bit_width = mem_bit_width  # Membrane potential quantization
 
-        # Encoder
+        # Encoder - First layer uses higher precision for better input processing
         self.e1 = SpikingConvBlock(
             2, base_ch, k=5, s=2, p=2,
             tau=tau, threshold=threshold, alpha=alpha,
-            use_bn=use_bn, quantize=quantize, bit_width=self.bit_width
+            use_bn=use_bn, quantize=quantize, bit_width=self.first_layer_bit_width,
+            hardware_mode=hardware_mode, mem_bit_width=self.mem_bit_width
         )
         self.e2 = SpikingConvBlock(
             base_ch, base_ch * 2, k=3, s=2, p=1,
             tau=tau, threshold=threshold, alpha=alpha,
-            use_bn=use_bn, quantize=quantize, bit_width=self.bit_width
+            use_bn=use_bn, quantize=quantize, bit_width=self.bit_width,
+            hardware_mode=hardware_mode, mem_bit_width=self.mem_bit_width
         )
         self.e3 = SpikingConvBlock(
             base_ch * 2, base_ch * 4, k=3, s=2, p=1,
             tau=tau, threshold=threshold, alpha=alpha,
-            use_bn=use_bn, quantize=quantize, bit_width=self.bit_width
+            use_bn=use_bn, quantize=quantize, bit_width=self.bit_width,
+            hardware_mode=hardware_mode, mem_bit_width=self.mem_bit_width
         )
 
         # Decoder blocks (note: channels stay consistent because skips are ADD, not CONCAT)
         self.d3 = SpikingConvBlock(
             base_ch * 4, base_ch * 2, k=3, s=1, p=1,
             tau=tau, threshold=threshold, alpha=alpha,
-            use_bn=use_bn, quantize=quantize, bit_width=self.bit_width
+            use_bn=use_bn, quantize=quantize, bit_width=self.bit_width,
+            hardware_mode=hardware_mode, mem_bit_width=self.mem_bit_width
         )
         self.d2 = SpikingConvBlock(
             base_ch * 2, base_ch, k=3, s=1, p=1,
             tau=tau, threshold=threshold, alpha=alpha,
-            use_bn=use_bn, quantize=quantize, bit_width=self.bit_width
+            use_bn=use_bn, quantize=quantize, bit_width=self.bit_width,
+            hardware_mode=hardware_mode, mem_bit_width=self.mem_bit_width
         )
         self.d1 = SpikingConvBlock(
             base_ch, base_ch, k=3, s=1, p=1,
             tau=tau, threshold=threshold, alpha=alpha,
-            use_bn=use_bn, quantize=quantize, bit_width=self.bit_width
+            use_bn=use_bn, quantize=quantize, bit_width=self.bit_width,
+            hardware_mode=hardware_mode, mem_bit_width=self.mem_bit_width
         )
 
         # 1x1 alignment convs for ADD skips (cheap, great for hardware)
@@ -235,10 +247,12 @@ class EventSNNFlowNetLiteV2(nn.Module):
         )
         
         # Flow head - final prediction layer
-        # Always use QuantizedConv2d for consistent structure
+        # Uses higher precision (output_bit_width) than rest of network
+        # This preserves output accuracy for low-bit quantization
+        # Quantization is enabled to avoid floating point values
         self.flow_head = QuantizedConv2d(
             base_ch, 2, kernel_size=3, padding=1,
-            bit_width=self.bit_width,
+            bit_width=self.output_bit_width,
             quantize_weights=quantize,
             quantize_activations=quantize
         )

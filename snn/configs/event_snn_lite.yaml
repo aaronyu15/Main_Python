@@ -20,6 +20,9 @@ use_bn: false                       # Use batch normalization in spiking blocks
 quantization_enabled: false        # Enable quantization-aware training
 initial_bit_width: 8               # Bit width for quantization (8 is a good starting point)
 binarize: false                    # Use binary (1-bit) quantization
+output_bit_width: 16               # Higher precision for output layer (only used when quantization_enabled: true)
+first_layer_bit_width: 8           # Higher precision for first encoder layer (processes raw events)
+mem_bit_width: 16                  # Bit width for membrane potential quantization
 
 # Recommended workflow:
 # 1. Train baseline without quantization first (quantization_enabled: false)
