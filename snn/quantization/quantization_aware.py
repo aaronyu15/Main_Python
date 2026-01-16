@@ -66,18 +66,24 @@ class QuantizationAwareLayer(nn.Module):
         
         if self.training:
             # Update running statistics using EMA
+            # CRITICAL FOR SNNs: Only update if there are non-zero activations
+            # to prevent collapse when most activations are zero (no spikes)
             with torch.no_grad():
-                min_val = x.min()
-                max_val = x.max()
+                # Check if we have meaningful activations
+                abs_max = x.abs().max()
                 
-                if self.num_batches_tracked == 0:
-                    self.running_min = min_val
-                    self.running_max = max_val
-                else:
-                    self.running_min = self.ema_decay * self.running_min + (1 - self.ema_decay) * min_val
-                    self.running_max = self.ema_decay * self.running_max + (1 - self.ema_decay) * max_val
-                
-                self.num_batches_tracked += 1
+                if abs_max > 1e-3:  # Only update if there are actual spikes/activations
+                    min_val = x.min()
+                    max_val = x.max()
+                    
+                    if self.num_batches_tracked == 0:
+                        self.running_min = min_val
+                        self.running_max = max_val
+                    else:
+                        self.running_min = self.ema_decay * self.running_min + (1 - self.ema_decay) * min_val
+                        self.running_max = self.ema_decay * self.running_max + (1 - self.ema_decay) * max_val
+                    
+                    self.num_batches_tracked += 1
         
         # Use running statistics for quantization
         if self.symmetric:
@@ -87,6 +93,10 @@ class QuantizationAwareLayer(nn.Module):
         else:
             scale = (self.running_max - self.running_min) / (2 ** self.bit_width - 1)
             zero_point = self.running_min
+        
+        # Enforce minimum scale to prevent collapse (critical for SNNs)
+        min_scale = 1e-4  # Prevent scale from becoming too small
+        scale = torch.clamp(scale, min=min_scale)
         
         # Fake quantization: quantize then dequantize
         if scale > 1e-8:  # Avoid division by zero
