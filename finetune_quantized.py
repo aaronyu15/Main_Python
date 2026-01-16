@@ -66,12 +66,15 @@ def load_config(config_path: str) -> dict:
     return config
 
 
-def build_quantized_model(config: dict) -> torch.nn.Module:
+def build_quantized_model(config: dict, logger=None) -> torch.nn.Module:
     """Build quantized model from configuration"""
     model_type = config.get('model_type', 'EventSNNFlowNetLiteV2')
     
     if model_type != 'EventSNNFlowNetLiteV2':
         raise ValueError(f"This script only supports EventSNNFlowNetLiteV2, got {model_type}")
+    
+    # Enable quantization logging (default to True for quantized fine-tuning)
+    enable_quant_logging = config.get('log_quantization', True)
     
     # Build model with quantization enabled
     model = EventSNNFlowNetLiteV2(
@@ -81,12 +84,15 @@ def build_quantized_model(config: dict) -> torch.nn.Module:
         alpha=config.get('alpha', 10.0),
         use_bn=config.get('use_bn', False),
         quantize=config.get('quantization_enabled', True),  # Enable quantization
-        bit_width=config.get('initial_bit_width', 8),
+        weight_bit_width=config.get('weight_bit_width', 8),
+        act_bit_width=config.get('act_bit_width', 8),
         binarize=config.get('binarize', False),
         hardware_mode=config.get('hardware_mode', False),
         output_bit_width=config.get('output_bit_width', 16),
         first_layer_bit_width=config.get('first_layer_bit_width', 8),
-        mem_bit_width=config.get('mem_bit_width', 16)
+        mem_bit_width=config.get('mem_bit_width', 16),
+        enable_logging=enable_quant_logging,
+        logger=logger
     )
     
     return model
@@ -243,17 +249,24 @@ def main():
     print(f"=" * 80)
     print(f"Config: {args.config}")
     print(f"Pretrained: {args.pretrained}")
-    print(f"Target bit-width: {config.get('initial_bit_width', 8)}-bit")
+    print(f"Weight bit-width: {config.get('weight_bit_width', 8)}-bit")
+    print(f"Activation bit-width: {config.get('act_bit_width', 8)}-bit")
     print(f"Binarize: {config.get('binarize', False)}")
+    if config.get('log_quantization', True):
+        print(f"✓ Quantization statistics will be logged to TensorBoard")
     print(f"=" * 80)
     
     # Set device
     device = args.device if torch.cuda.is_available() else 'cpu'
     print(f"\nUsing device: {device}")
     
-    # Build quantized model
+    # Create logger first (needed for quantization logging)
+    from snn.utils.logger import Logger
+    logger = Logger(log_dir=args.log_dir)
+    
+    # Build quantized model with logger
     print("\nBuilding quantized model...")
-    model = build_quantized_model(config)
+    model = build_quantized_model(config, logger=logger)
     
     # Count parameters
     num_params = sum(p.numel() for p in model.parameters())
@@ -275,7 +288,7 @@ def main():
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
     
-    # Create trainer
+    # Create trainer (using the logger we already created)
     print(f"\nInitializing trainer...")
     print(f"  Checkpoint dir: {checkpoint_dir}")
     print(f"  Log dir: {log_dir}")
@@ -287,7 +300,8 @@ def main():
         config=config,
         device=device,
         checkpoint_dir=str(checkpoint_dir),
-        log_dir=str(log_dir)
+        log_dir=str(log_dir),
+        logger=logger  # Pass existing logger
     )
     
     # Log configuration

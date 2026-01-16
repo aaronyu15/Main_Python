@@ -139,15 +139,20 @@ class SpikingConvBlock(nn.Module):
         use_bn=False,
         groups=1,
         quantize=False,
-        bit_width=8,
+        weight_bit_width=8,
+        act_bit_width=8,
         hardware_mode=False,
-        mem_bit_width=16
+        mem_bit_width=16,
+        enable_logging=False,
+        layer_name="spiking_conv",
+        logger=None  # TensorBoard logger instance
     ):
         super().__init__()
         
         # Quantization support - use QuantizedConv2d for full quantization
         self.quantize = quantize
-        self.bit_width = bit_width
+        self.weight_bit_width = weight_bit_width
+        self.act_bit_width = act_bit_width
         self.hardware_mode = hardware_mode
         self.mem_bit_width = mem_bit_width
         
@@ -157,9 +162,13 @@ class SpikingConvBlock(nn.Module):
         self.conv = QuantizedConv2d(
             in_ch, out_ch, kernel_size=k, stride=s, padding=p, 
             groups=groups, bias=not use_bn,
-            bit_width=bit_width,
+            weight_bit_width=weight_bit_width,
+            act_bit_width=act_bit_width,
             quantize_weights=quantize,
-            quantize_activations=quantize
+            quantize_activations=quantize,
+            enable_logging=enable_logging,
+            layer_name=layer_name,
+            logger=logger
         )
         
         self.bn = nn.BatchNorm2d(out_ch) if use_bn else None

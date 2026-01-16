@@ -14,12 +14,13 @@ use_bn: false
 
 # Quantization Settings - 4-bit QAT
 quantization_enabled: true
-initial_bit_width: 4
-binarize: false
+weight_bit_width: 4                 # Weight quantization bit-width
+act_bit_width: 4                    # Activation quantization bit-widthbinarize: false
 output_bit_width: 16                # Higher precision for output layer (flow prediction)
 first_layer_bit_width: 8            # Keep first layer at 8-bit (higher than network 4-bit)
 mem_bit_width: 16                   # Higher precision for membrane potential
 hardware_mode: True
+log_quantization: true              # Log quantization statistics to TensorBoard
 
 # Training Settings - Fine-tuning
 num_epochs: 30

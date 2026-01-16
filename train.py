@@ -40,9 +40,12 @@ def load_config(config_path: str) -> dict:
     return config
 
 
-def build_model(config: dict) -> torch.nn.Module:
+def build_model(config: dict, logger=None) -> torch.nn.Module:
     """Build model from configuration"""
     model_type = config.get('model_type', 'SpikingFlowNet')
+    
+    # Enable quantization logging if quantization is enabled
+    enable_quant_logging = config.get('quantization_enabled', False) and config.get('log_quantization', False)
     
     if model_type == 'EventSNNFlowNetLite':
         # EventSNNFlowNetLite uses different parameters
@@ -53,7 +56,8 @@ def build_model(config: dict) -> torch.nn.Module:
             alpha=config.get('alpha', 10.0),
             use_bn=config.get('use_bn', False),
             quantize=config.get('quantization_enabled', False),
-            bit_width=config.get('initial_bit_width', 8),
+            weight_bit_width=config.get('weight_bit_width', 8),
+            act_bit_width=config.get('act_bit_width', 8),
             binarize=config.get('binarize', False)
         )
     elif model_type == 'EventSNNFlowNetLiteV2':
@@ -64,12 +68,15 @@ def build_model(config: dict) -> torch.nn.Module:
             alpha=config.get('alpha', 10.0),
             use_bn=config.get('use_bn', False),
             quantize=config.get('quantization_enabled', False),
-            bit_width=config.get('initial_bit_width', 8),
+            weight_bit_width=config.get('weight_bit_width', 8),
+            act_bit_width=config.get('act_bit_width', 8),
             binarize=config.get('binarize', False),
             hardware_mode=config.get('hardware_mode', False),
             output_bit_width=config.get('output_bit_width', 16),
             first_layer_bit_width=config.get('first_layer_bit_width', 8),
-            mem_bit_width=config.get('mem_bit_width', 16)
+            mem_bit_width=config.get('mem_bit_width', 16),
+            enable_logging=enable_quant_logging,
+            logger=logger
         )
     
     return model
@@ -163,9 +170,19 @@ def main():
     device = args.device if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
     
-    # Build model
-    model = build_model(config)
+    # Create logger first (needed for quantization logging)
+    from snn.utils.logger import Logger
+    logger = Logger(log_dir=args.log_dir)
+    
+    # Build model with logger for quantization statistics
+    model = build_model(config, logger=logger)
     print(f"Built model: {config.get('model_type', 'SpikingFlowNet')}")
+    
+    # Log quantization status
+    if config.get('quantization_enabled', False):
+        print(f"Quantization enabled: W{config.get('weight_bit_width', 8)}A{config.get('act_bit_width', 8)}")
+        if config.get('log_quantization', False):
+            print(f"✓ Quantization statistics will be logged to TensorBoard")
     
     # Count parameters
     num_params = sum(p.numel() for p in model.parameters())
@@ -179,7 +196,7 @@ def main():
     print(f"Train samples: {len(train_loader.dataset)}")
     print(f"Val samples: {len(val_loader.dataset)}")
     
-    # Create trainer
+    # Create trainer (using the logger we already created)
     trainer = SNNTrainer(
         model=model,
         train_loader=train_loader,
@@ -187,7 +204,8 @@ def main():
         config=config,
         device=device,
         checkpoint_dir=args.checkpoint_dir,
-        log_dir=args.log_dir
+        log_dir=args.log_dir,
+        logger=logger  # Pass existing logger
     )
     
     # Log configuration

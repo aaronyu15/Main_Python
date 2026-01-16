@@ -54,7 +54,8 @@ def load_model(checkpoint_path: str, device: str):
             alpha=config.get('alpha', 10.0),
             use_bn=config.get('use_bn', False),
             quantize=config.get('quantization_enabled', False),
-            bit_width=config.get('initial_bit_width', 8),
+            weight_bit_width=config.get('weight_bit_width', 8),
+            act_bit_width=config.get('act_bit_width', 8),
             binarize=config.get('binarize', False)
         )
     elif model_type == 'EventSNNFlowNetLiteV2':
@@ -65,7 +66,8 @@ def load_model(checkpoint_path: str, device: str):
             alpha=config.get('alpha', 10.0),
             use_bn=config.get('use_bn', False),
             quantize=config.get('quantization_enabled', False),
-            bit_width=config.get('initial_bit_width', 8),
+            weight_bit_width=config.get('weight_bit_width', 8),
+            act_bit_width=config.get('act_bit_width', 8),
             binarize=config.get('binarize', False),
             output_bit_width=config.get('output_bit_width', 16),
             first_layer_bit_width=config.get('first_layer_bit_width', 8),

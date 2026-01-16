@@ -38,7 +38,8 @@ class SNNTrainer:
         config: Dict,
         device: str = 'cuda',
         checkpoint_dir: str = './checkpoints',
-        log_dir: str = './logs'
+        log_dir: str = './logs',
+        logger: Optional[Logger] = None  # Accept external logger
     ):
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -52,8 +53,8 @@ class SNNTrainer:
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         
-        # Logger
-        self.logger = Logger(log_dir)
+        # Logger (use provided logger or create new one)
+        self.logger = logger if logger is not None else Logger(log_dir)
         
         # Loss function
         self.criterion = CombinedLoss(
@@ -87,14 +88,6 @@ class SNNTrainer:
         
         # Quantization schedule
         self.quantization_enabled = config.get('quantization_enabled', False)
-        
-        # If no schedule provided, use initial_bit_width for all epochs
-        if 'quantization_schedule' in config:
-            self.quantization_schedule = config['quantization_schedule']
-        else:
-            # Create simple schedule: keep initial bit-width throughout training
-            initial_bw = config.get('initial_bit_width', 8)
-            self.quantization_schedule = {0: initial_bw}
         
     def train_epoch(self) -> Dict[str, float]:
         """Train for one epoch"""
@@ -318,44 +311,6 @@ class SNNTrainer:
             'flow_avg': val_flow_avg
         }
     
-    def update_quantization(self):
-        """Update quantization bit-width based on schedule"""
-        if not self.quantization_enabled:
-            return
-        
-        # Find current bit width from schedule
-        current_bit_width = None
-        for epoch_threshold in sorted(self.quantization_schedule.keys(), reverse=True):
-            if self.epoch >= epoch_threshold:
-                current_bit_width = self.quantization_schedule[epoch_threshold]
-                break
-        
-        if current_bit_width is None:
-            return  # No schedule entry applies yet
-        
-        # Update model quantization bit-width
-        updated = False
-        for module in self.model.modules():
-            if hasattr(module, 'bit_width'):
-                if module.bit_width != current_bit_width:
-                    if not updated:  # Only print once
-                        print(f"Epoch {self.epoch}: Updating quantization {module.bit_width}-bit -> {current_bit_width}-bit")
-                        updated = True
-                    module.bit_width = current_bit_width
-                    
-                    # Update quantization layer if it exists
-                    if hasattr(module, 'quant_layer') and module.quant_layer is not None:
-                        module.quant_layer.bit_width = current_bit_width
-                        # Reset running statistics for new bit-width
-                        module.quant_layer.num_batches_tracked.zero_()
-                        
-                        # Update qmin/qmax for new bit-width
-                        if module.quant_layer.symmetric:
-                            module.quant_layer.qmin = -(2 ** (current_bit_width - 1))
-                            module.quant_layer.qmax = 2 ** (current_bit_width - 1) - 1
-                        else:
-                            module.quant_layer.qmin = 0
-                            module.quant_layer.qmax = 2 ** current_bit_width - 1
     
     def save_checkpoint(self, filename: str = 'checkpoint.pth', is_best: bool = False):
         """Save checkpoint"""
@@ -410,9 +365,6 @@ class SNNTrainer:
         
         for epoch in range(start_epoch, num_epochs):
             self.epoch = epoch
-            
-            # Update quantization schedule
-            self.update_quantization()
             
             # Train
             train_metrics = self.train_epoch()
