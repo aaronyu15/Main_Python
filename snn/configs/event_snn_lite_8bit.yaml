@@ -21,7 +21,7 @@ output_bit_width: 16                # Higher precision for output layer (flow pr
 first_layer_bit_width: 8            # Keep first layer at 8-bit (same as network)
 mem_bit_width: 16                   # Higher precision for membrane potential
 hardware_mode: True
-log_quantization: true              # Log quantization statistics to TensorBoard
+log_params: true                    # Log model parameters and statistics to TensorBoard
 
 # Training Settings - Fine-tuning
 num_epochs: 30                      # Fewer epochs for fine-tuning

@@ -44,8 +44,8 @@ def build_model(config: dict, logger=None) -> torch.nn.Module:
     """Build model from configuration"""
     model_type = config.get('model_type', 'SpikingFlowNet')
     
-    # Enable quantization logging if quantization is enabled
-    enable_quant_logging = config.get('quantization_enabled', False) and config.get('log_quantization', False)
+    # Enable parameter logging (for both quantized and non-quantized models)
+    log_params = config.get('log_params', False)
     
     if model_type == 'EventSNNFlowNetLite':
         # EventSNNFlowNetLite uses different parameters
@@ -75,7 +75,7 @@ def build_model(config: dict, logger=None) -> torch.nn.Module:
             output_bit_width=config.get('output_bit_width', 16),
             first_layer_bit_width=config.get('first_layer_bit_width', 8),
             mem_bit_width=config.get('mem_bit_width', 16),
-            enable_logging=enable_quant_logging,
+            enable_logging=log_params,
             logger=logger
         )
     
@@ -181,8 +181,8 @@ def main():
     # Log quantization status
     if config.get('quantization_enabled', False):
         print(f"Quantization enabled: W{config.get('weight_bit_width', 8)}A{config.get('act_bit_width', 8)}")
-        if config.get('log_quantization', False):
-            print(f"✓ Quantization statistics will be logged to TensorBoard")
+    if config.get('log_params', False):
+        print(f"✓ Model parameters and statistics will be logged to TensorBoard")
     
     # Count parameters
     num_params = sum(p.numel() for p in model.parameters())

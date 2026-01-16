@@ -73,8 +73,8 @@ def build_quantized_model(config: dict, logger=None) -> torch.nn.Module:
     if model_type != 'EventSNNFlowNetLiteV2':
         raise ValueError(f"This script only supports EventSNNFlowNetLiteV2, got {model_type}")
     
-    # Enable quantization logging (default to True for quantized fine-tuning)
-    enable_quant_logging = config.get('log_quantization', True)
+    # Enable parameter logging (default to True for quantized fine-tuning)
+    log_params = config.get('log_params', True)
     
     # Build model with quantization enabled
     model = EventSNNFlowNetLiteV2(
@@ -91,7 +91,7 @@ def build_quantized_model(config: dict, logger=None) -> torch.nn.Module:
         output_bit_width=config.get('output_bit_width', 16),
         first_layer_bit_width=config.get('first_layer_bit_width', 8),
         mem_bit_width=config.get('mem_bit_width', 16),
-        enable_logging=enable_quant_logging,
+        enable_logging=log_params,
         logger=logger
     )
     
@@ -252,8 +252,8 @@ def main():
     print(f"Weight bit-width: {config.get('weight_bit_width', 8)}-bit")
     print(f"Activation bit-width: {config.get('act_bit_width', 8)}-bit")
     print(f"Binarize: {config.get('binarize', False)}")
-    if config.get('log_quantization', True):
-        print(f"✓ Quantization statistics will be logged to TensorBoard")
+    if config.get('log_params', True):
+        print(f"✓ Model parameters and statistics will be logged to TensorBoard")
     print(f"=" * 80)
     
     # Set device

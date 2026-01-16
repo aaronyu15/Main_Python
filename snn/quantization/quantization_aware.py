@@ -43,7 +43,8 @@ class QuantizationAwareLayer(nn.Module):
         ema_decay: float = 0.9,
         enable_logging: bool = False,
         layer_name: str = "unknown",
-        logger: Optional[Any] = None  # TensorBoard logger instance
+        logger: Optional[Any] = None,  # TensorBoard logger instance
+        quantize: bool = True  # Whether to actually quantize or just log
     ):
         super().__init__()
         
@@ -53,6 +54,7 @@ class QuantizationAwareLayer(nn.Module):
         self.enable_logging = enable_logging
         self.layer_name = layer_name
         self.logger = logger
+        self.quantize = quantize
         self.forward_count = 0
         
         # Quantization levels
@@ -122,47 +124,48 @@ class QuantizationAwareLayer(nn.Module):
         min_scale = 0.01  # More aggressive floor for SNN stability
         scale = torch.clamp(scale, min=min_scale)
         
-        # Fake quantization: quantize then dequantize
-        if scale > 1e-8:  # Avoid division by zero
+        # Fake quantization: quantize then dequantize (only if quantize flag is True)
+        if self.quantize and scale > 1e-8:  # Avoid division by zero
             x_q = (x - zero_point) / scale
             x_q = torch.clamp(x_q, self.qmin, self.qmax)
             x_q = StraightThroughEstimator.apply(x_q)
             x_dequant = x_q * scale + zero_point
-            
-            # Log statistics to TensorBoard if enabled
-            if self.enable_logging and self.training and self.logger is not None and self.forward_count % 100 == 0:
-                with torch.no_grad():
-                    # Log activation statistics
-                    self.logger.log_scalars(f'quant/{self.layer_name}/input', {
-                        'min': x.min().item(),
-                        'max': x.max().item(),
-                        'mean': x.mean().item(),
-                        'std': x.std().item()
-                    }, self.forward_count)
-                    
-                    self.logger.log_scalars(f'quant/{self.layer_name}/output', {
-                        'min': x_dequant.min().item(),
-                        'max': x_dequant.max().item(),
-                        'mean': x_dequant.mean().item(),
-                        'std': x_dequant.std().item()
-                    }, self.forward_count)
-                    
-                    # Log quantization parameters
-                    self.logger.log_scalars(f'quant/{self.layer_name}/params', {
-                        'scale': scale.item(),
-                        'running_max': self.running_max.item(),
-                        'peak_max': self.peak_max.item()
-                    }, self.forward_count)
-                    
-                    # Log histogram of activations
-                    self.logger.log_histogram(f'quant/{self.layer_name}/input_hist', x, self.forward_count)
-                    self.logger.log_histogram(f'quant/{self.layer_name}/output_hist', x_dequant, self.forward_count)
-            
-            self.forward_count += 1
-            return x_dequant
         else:
-            self.forward_count += 1
-            return x
+            # No quantization, pass through as-is
+            x_dequant = x
+            
+        # Log statistics to TensorBoard if enabled (regardless of quantization mode)
+        if self.enable_logging and self.training and self.logger is not None and self.forward_count % 100 == 0:
+            with torch.no_grad():
+                # Log activation statistics
+                self.logger.log_scalars(f'params/{self.layer_name}/activations/input', {
+                    'min': x.min().item(),
+                    'max': x.max().item(),
+                    'mean': x.mean().item(),
+                    'std': x.std().item()
+                }, self.forward_count)
+                
+                self.logger.log_scalars(f'params/{self.layer_name}/activations/output', {
+                    'min': x_dequant.min().item(),
+                    'max': x_dequant.max().item(),
+                    'mean': x_dequant.mean().item(),
+                    'std': x_dequant.std().item()
+                }, self.forward_count)
+                
+                # Log quantization parameters (even if not quantizing, shows what they would be)
+                self.logger.log_scalars(f'params/{self.layer_name}/activations/params', {
+                    'scale': scale.item(),
+                    'running_max': self.running_max.item(),
+                    'peak_max': self.peak_max.item(),
+                    'quantize_enabled': float(self.quantize)
+                }, self.forward_count)
+                
+                # Log histogram of activations
+                self.logger.log_histogram(f'params/{self.layer_name}/activations/input_hist', x, self.forward_count)
+                self.logger.log_histogram(f'params/{self.layer_name}/activations/output_hist', x_dequant, self.forward_count)
+        
+        self.forward_count += 1
+        return x_dequant
 
 
 class BinaryQuantizer(nn.Module):
@@ -319,66 +322,41 @@ class QuantizedConv2d(nn.Module):
             groups=groups, bias=bias
         )
         
-        # Activation quantization layer (always present for consistent structure)
-        # When disabled, it acts as identity
-        if quantize_activations:
-            self.act_quant = QuantizationAwareLayer(
-                bit_width=self.act_bit_width,
-                enable_logging=enable_logging,
-                layer_name=f"{layer_name}_act",
-                logger=logger
-            )
-        else:
-            self.act_quant = nn.Identity()
+        # Activation quantization layer (always present for logging)
+        # When quantization is disabled, it still logs but doesn't quantize
+        self.act_quant = QuantizationAwareLayer(
+            bit_width=self.act_bit_width,
+            enable_logging=enable_logging,
+            layer_name=layer_name,  # Use base layer name, not layer_name_act
+            logger=logger,
+            quantize=quantize_activations  # Pass quantization flag
+        )
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass with quantized weights and activations
         """
-        # Log weight statistics to TensorBoard if enabled
-        if self.enable_logging and self.training and self.logger is not None and self.forward_count % 100 == 0:
-            with torch.no_grad():
-                w = self.conv.weight
-                self.logger.log_scalars(f'quant/{self.layer_name}/weight_fp32', {
-                    'min': w.min().item(),
-                    'max': w.max().item(),
-                    'mean': w.mean().item(),
-                    'std': w.std().item()
-                }, self.forward_count)
-                self.logger.log_histogram(f'quant/{self.layer_name}/weight_fp32_hist', w, self.forward_count)
-        
         # Quantize weights if enabled (using weight_bit_width)
         if self.quantize_weights and self.weight_bit_width > 1:
             # Multi-bit weight quantization
             weight = QuantizedWeight.apply(self.conv.weight, self.weight_bit_width)
-            
-            # Log quantized weight statistics to TensorBoard
-            if self.enable_logging and self.training and self.logger is not None and self.forward_count % 100 == 0:
-                with torch.no_grad():
-                    self.logger.log_scalars(f'quant/{self.layer_name}/weight_quant', {
-                        'min': weight.min().item(),
-                        'max': weight.max().item(),
-                        'mean': weight.mean().item(),
-                        'std': weight.std().item()
-                    }, self.forward_count)
-                    self.logger.log_histogram(f'quant/{self.layer_name}/weight_quant_hist', weight, self.forward_count)
         elif self.quantize_weights and self.weight_bit_width == 1:
             # Binary weight quantization
             weight = BinaryWeight.apply(self.conv.weight)
-            
-            # Log binary weight statistics to TensorBoard
-            if self.enable_logging and self.training and self.logger is not None and self.forward_count % 100 == 0:
-                with torch.no_grad():
-                    self.logger.log_scalars(f'quant/{self.layer_name}/weight_binary', {
-                        'min': weight.min().item(),
-                        'max': weight.max().item(),
-                        'mean': weight.mean().item(),
-                        'std': weight.std().item()
-                    }, self.forward_count)
-                    self.logger.log_histogram(f'quant/{self.layer_name}/weight_binary_hist', weight, self.forward_count)
         else:
             # No weight quantization
             weight = self.conv.weight
+        
+        # Log quantized/processed weight statistics to TensorBoard (regardless of quantization mode)
+        if self.enable_logging and self.training and self.logger is not None and self.forward_count % 100 == 0:
+            with torch.no_grad():
+                self.logger.log_scalars(f'params/{self.layer_name}/weights', {
+                    'min': weight.min().item(),
+                    'max': weight.max().item(),
+                    'mean': weight.mean().item(),
+                    'std': weight.std().item()
+                }, self.forward_count)
+                self.logger.log_histogram(f'params/{self.layer_name}/weights_hist', weight, self.forward_count)
         
         # Perform convolution with quantized weights
         out = F.conv2d(
