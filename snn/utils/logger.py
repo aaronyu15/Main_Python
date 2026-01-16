@@ -29,8 +29,9 @@ class Logger:
         self.writer.add_scalar(tag, value, step)
     
     def log_scalars(self, tag: str, values: Dict[str, float], step: int):
-        """Log multiple scalars"""
-        self.writer.add_scalars(tag, values, step)
+        """Log multiple scalars as individual metrics under a common prefix"""
+        for key, value in values.items():
+            self.writer.add_scalar(f'{tag}/{key}', value, step)
     
     def log_image(self, tag: str, image: torch.Tensor, step: int):
         """Log image"""
