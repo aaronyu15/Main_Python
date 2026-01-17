@@ -157,7 +157,6 @@ class QuantizationAwareLayer(nn.Module):
                     'scale': scale.item(),
                     'running_max': self.running_max.item(),
                     'peak_max': self.peak_max.item(),
-                    'quantize_enabled': float(self.quantize)
                 }, self.forward_count)
                 
                 # Log histogram of activations
@@ -322,6 +321,12 @@ class QuantizedConv2d(nn.Module):
             groups=groups, bias=bias
         )
         
+        # Weight scale tracking (per-channel, shape: [out_channels, 1, 1, 1])
+        # Initialize after conv layer so we know out_channels
+        if self.quantize_weights:
+            self.register_buffer('weight_scale', torch.ones(out_channels, 1, 1, 1))
+            self.register_buffer('weight_scale_initialized', torch.tensor(False))
+        
         # Activation quantization layer (always present for logging)
         # When quantization is disabled, it still logs but doesn't quantize
         self.act_quant = QuantizationAwareLayer(
@@ -338,8 +343,27 @@ class QuantizedConv2d(nn.Module):
         """
         # Quantize weights if enabled (using weight_bit_width)
         if self.quantize_weights and self.weight_bit_width > 1:
-            # Multi-bit weight quantization
-            weight = QuantizedWeight.apply(self.conv.weight, self.weight_bit_width)
+            # Multi-bit weight quantization with persistent scale
+            # Initialize scale on first forward pass
+            if not self.weight_scale_initialized:
+                with torch.no_grad():
+                    # Calculate initial per-channel max absolute value
+                    w_reshaped = self.conv.weight.abs().view(self.conv.weight.size(0), -1)
+                    max_abs = w_reshaped.max(dim=1, keepdim=True)[0].unsqueeze(-1).unsqueeze(-1)
+                    
+                    # Set scale based on initial weights
+                    qmax = 2 ** (self.weight_bit_width - 1) - 1
+                    self.weight_scale.copy_(max_abs / qmax)
+                    self.weight_scale.clamp_(min=1e-4)  # Minimum scale to prevent collapse
+                    self.weight_scale_initialized.fill_(True)
+            
+            # Quantize using FIXED scale (doesn't change with weight values)
+            qmax = 2 ** (self.weight_bit_width - 1) - 1
+            w_q = self.conv.weight / self.weight_scale
+            w_q = torch.clamp(w_q, -qmax, qmax)
+            w_q = StraightThroughEstimator.apply(w_q.round())
+            weight = w_q * self.weight_scale
+            
         elif self.quantize_weights and self.weight_bit_width == 1:
             # Binary weight quantization
             weight = BinaryWeight.apply(self.conv.weight)
