@@ -322,10 +322,12 @@ class QuantizedConv2d(nn.Module):
         )
         
         # Weight scale tracking (per-channel, shape: [out_channels, 1, 1, 1])
-        # Initialize after conv layer so we know out_channels
+        # Uses EMA with peak floor to prevent collapse
         if self.quantize_weights:
-            self.register_buffer('weight_scale', torch.ones(out_channels, 1, 1, 1))
+            self.register_buffer('weight_running_scale', torch.ones(out_channels, 1, 1, 1))
+            self.register_buffer('weight_peak_scale', torch.ones(out_channels, 1, 1, 1))
             self.register_buffer('weight_scale_initialized', torch.tensor(False))
+            self.weight_scale_ema = 0.9  # EMA decay for weight scale
         
         # Activation quantization layer (always present for logging)
         # When quantization is disabled, it still logs but doesn't quantize
@@ -343,26 +345,44 @@ class QuantizedConv2d(nn.Module):
         """
         # Quantize weights if enabled (using weight_bit_width)
         if self.quantize_weights and self.weight_bit_width > 1:
-            # Multi-bit weight quantization with persistent scale
-            # Initialize scale on first forward pass
-            if not self.weight_scale_initialized:
-                with torch.no_grad():
-                    # Calculate initial per-channel max absolute value
-                    w_reshaped = self.conv.weight.abs().view(self.conv.weight.size(0), -1)
-                    max_abs = w_reshaped.max(dim=1, keepdim=True)[0].unsqueeze(-1).unsqueeze(-1)
-                    
-                    # Set scale based on initial weights
-                    qmax = 2 ** (self.weight_bit_width - 1) - 1
-                    self.weight_scale.copy_(max_abs / qmax)
-                    self.weight_scale.clamp_(min=1e-4)  # Minimum scale to prevent collapse
+            # Multi-bit weight quantization with EMA scale and peak tracking
+            with torch.no_grad():
+                # Calculate current per-channel max absolute value
+                w_reshaped = self.conv.weight.abs().view(self.conv.weight.size(0), -1)
+                current_max = w_reshaped.max(dim=1, keepdim=True)[0].unsqueeze(-1).unsqueeze(-1)
+                
+                qmax = 2 ** (self.weight_bit_width - 1) - 1
+                current_scale = current_max / qmax
+                current_scale = torch.clamp(current_scale, min=1e-4)
+                
+                # Initialize or update scale statistics
+                if not self.weight_scale_initialized:
+                    # First time: initialize both running and peak
+                    self.weight_running_scale.copy_(current_scale)
+                    self.weight_peak_scale.copy_(current_scale)
                     self.weight_scale_initialized.fill_(True)
+                elif self.training:
+                    # Update EMA running scale
+                    self.weight_running_scale.mul_(self.weight_scale_ema).add_(
+                        current_scale * (1 - self.weight_scale_ema)
+                    )
+                    # Update peak (never decreases)
+                    self.weight_peak_scale.copy_(torch.maximum(
+                        self.weight_peak_scale, current_scale
+                    ))
             
-            # Quantize using FIXED scale (doesn't change with weight values)
+            # Use floor mechanism: scale can't drop below 50% of peak
+            effective_scale = torch.maximum(
+                self.weight_running_scale,
+                self.weight_peak_scale * 0.5
+            )
+            
+            # Quantize using effective scale
             qmax = 2 ** (self.weight_bit_width - 1) - 1
-            w_q = self.conv.weight / self.weight_scale
+            w_q = self.conv.weight / effective_scale
             w_q = torch.clamp(w_q, -qmax, qmax)
             w_q = StraightThroughEstimator.apply(w_q.round())
-            weight = w_q * self.weight_scale
+            weight = w_q * effective_scale
             
         elif self.quantize_weights and self.weight_bit_width == 1:
             # Binary weight quantization
