@@ -21,8 +21,6 @@ def parse_args():
                       help='Path to configuration file')
     parser.add_argument('--resume', type=str, default=None,
                       help='Path to checkpoint to resume from')
-    parser.add_argument('--device', type=str, default='cuda',
-                      help='Device to use (cuda or cpu)')
     parser.add_argument('--data-root', type=str, default='../blink_sim/output',
                       help='Root directory for dataset')
     parser.add_argument('--checkpoint-dir', type=str, default='./checkpoints',
@@ -50,17 +48,14 @@ def build_model(config: dict, logger=None) -> torch.nn.Module:
     if model_type == 'EventSNNFlowNetLite':
         model = EventSNNFlowNetLite(
             base_ch=config.get('base_ch', 32),
-            tau=config.get('tau', 2.0),
+            decay=config.get('decay', 0.5),
             threshold=config.get('threshold', 1.0),
             alpha=config.get('alpha', 10.0),
-            use_bn=config.get('use_bn', False),
             quantize_weights=config.get('quantize_weights', False),
             quantize_activations=config.get('quantize_activations', False),
             quantize_mem=config.get('quantize_mem', False),
             weight_bit_width=config.get('weight_bit_width', 8),
             act_bit_width=config.get('act_bit_width', 8),
-            binarize=config.get('binarize', False),
-            hardware_mode=config.get('hardware_mode', False),
             output_bit_width=config.get('output_bit_width', 16),
             first_layer_bit_width=config.get('first_layer_bit_width', 8),
             mem_bit_width=config.get('mem_bit_width', 16),
@@ -156,7 +151,7 @@ def main():
     print(f"Loaded configuration from {args.config}")
     
     # Set device
-    device = args.device if torch.cuda.is_available() else 'cpu'
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
     
     # Create logger first (needed for quantization logging)

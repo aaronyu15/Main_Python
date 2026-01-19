@@ -59,10 +59,7 @@ class SNNTrainer:
         # Loss function
         self.criterion = CombinedLoss(
             flow_weight=config.get('flow_weight', 1.0),
-            smooth_weight=config.get('smooth_weight', 0.1),
-            sparsity_weight=config.get('sparsity_weight', 0.01),
-            quant_weight=config.get('quant_weight', 0.0001),
-            target_spike_rate=config.get('target_spike_rate', 0.1)
+            angular_weight=config.get('angular_weight', 0.0),
         )
         
         # Optimizer
@@ -96,9 +93,7 @@ class SNNTrainer:
         epoch_losses = {
             'total_loss': 0.0,
             'flow_loss': 0.0,
-            'smooth_loss': 0.0,
-            'sparsity_loss': 0.0,
-            'quant_loss': 0.0
+            'angular_loss': 0.0,
         }
         epoch_epe = 0.0
         epoch_outliers = 0.0

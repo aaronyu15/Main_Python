@@ -7,8 +7,8 @@ in_channels: 2
 num_bins: 5
 num_timesteps: 5
 base_ch: 32
-tau: 2.0
-threshold: 1.0
+decay: 0.5                            # LIF neuron time constant
+threshold: 16.0                      # LIF neuron firing threshold
 alpha: 10.0
 use_bn: false
 

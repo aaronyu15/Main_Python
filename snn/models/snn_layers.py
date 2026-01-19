@@ -48,9 +48,6 @@ def quantize_membrane(mem, bit_width=8, mem_range=2.0):
     Returns:
         Quantized membrane potential
     """
-    if bit_width >= 32:  # No quantization for high precision
-        return mem
-    
     # Symmetric quantization around zero
     qmax = 2 ** (bit_width - 1) - 1
     scale = mem_range / qmax
@@ -69,51 +66,30 @@ def quantize_membrane(mem, bit_width=8, mem_range=2.0):
 # -------------------------
 # LIF neuron update
 # -------------------------
-def lif_update(mem, inp, tau=2.0, threshold=1.0, alpha=10.0, hardware_mode=False, 
+def lif_update(mem, inp, decay=0.5, threshold=1.0, alpha=10.0,
                quantize_mem=False, mem_bit_width=8):
     """
-    LIF neuron membrane update with hardware-friendly option
+    LIF neuron membrane update
     
     Args:
         mem: membrane state
         inp: input current (conv output)
-        tau: membrane time constant
+        decay: membrane decay factor (0-1, smaller = faster decay)
         threshold: spike threshold
         alpha: surrogate gradient slope
-        hardware_mode: Use FPGA-friendly integer approximations
         quantize_mem: Enable membrane potential quantization
         mem_bit_width: Bit width for membrane quantization
-    
-    Hardware mode benefits:
-    - Uses bit-shift for decay (power-of-2 approximation)
-    - Avoids expensive exp() computation
-    - Integer-friendly operations for quantized networks
     """
     if mem is None:
         mem = torch.zeros_like(inp)
 
-    if hardware_mode:
-        # FPGA-friendly: Use bit-shift approximation for decay
-        # Instead of exp(-1/tau), use 1 - 1/2^k where k = round(log2(tau))
-        # For tau=2: decay ≈ 0.5 (right shift by 1)
-        # For tau=4: decay ≈ 0.75 (right shift by 2)
-        import math
-        shift = max(1, int(round(math.log2(tau))))
-        # mem_new = mem - mem/2^shift + inp = mem*(1 - 1/2^shift) + inp
-        mem = mem - (mem / (2 ** shift)) + inp
-    else:
-        # Standard floating-point decay (for training)
-        # Cache decay value to avoid recomputing exp every time
-        decay = torch.exp(torch.tensor(-1.0 / tau, device=inp.device, dtype=inp.dtype))
-        mem = mem * decay + inp
-
-    # Quantize membrane potential if enabled
-    if quantize_mem:
-        mem = quantize_membrane(mem, bit_width=mem_bit_width, mem_range=threshold * 2.0)
+    # Use decay factor directly
+    decay_factor = torch.tensor(decay, device=inp.device, dtype=inp.dtype)
+    mem = mem * decay_factor + inp
 
     spk = spike_fn(mem - threshold, alpha=alpha)
     # reset by subtracting threshold on spike (soft reset)
-    mem = mem - spk * threshold
+    mem = mem - spk * mem
     
     # Quantize membrane again after reset if enabled
     if quantize_mem:
@@ -133,17 +109,14 @@ class SpikingConvBlock(nn.Module):
         k=3,
         s=1,
         p=1,
-        tau=2.0,
+        decay=0.5,
         threshold=1.0,
         alpha=10.0,
-        use_bn=False,
-        groups=1,
         quantize_weights=False,
         quantize_activations=False,
         quantize_mem=False,
         weight_bit_width=8,
         act_bit_width=8,
-        hardware_mode=False,
         mem_bit_width=16,
         enable_logging=False,
         layer_name="spiking_conv",
@@ -157,7 +130,6 @@ class SpikingConvBlock(nn.Module):
         self.quantize_mem = quantize_mem
         self.weight_bit_width = weight_bit_width
         self.act_bit_width = act_bit_width
-        self.hardware_mode = hardware_mode
         self.mem_bit_width = mem_bit_width
         
         # Always use QuantizedConv2d for consistent structure
@@ -165,7 +137,6 @@ class SpikingConvBlock(nn.Module):
         from ..quantization import QuantizedConv2d
         self.conv = QuantizedConv2d(
             in_ch, out_ch, kernel_size=k, stride=s, padding=p, 
-            groups=groups, bias=not use_bn,
             weight_bit_width=weight_bit_width,
             act_bit_width=act_bit_width,
             quantize_weights=quantize_weights,
@@ -175,8 +146,7 @@ class SpikingConvBlock(nn.Module):
             logger=logger
         )
         
-        self.bn = nn.BatchNorm2d(out_ch) if use_bn else None
-        self.tau = tau
+        self.decay = decay
         self.threshold = threshold
         self.alpha = alpha
 
@@ -184,13 +154,9 @@ class SpikingConvBlock(nn.Module):
         # Convolution (with weight and activation quantization if enabled)
         x = self.conv(x)
         
-        # Batch normalization
-        if self.bn is not None:
-            x = self.bn(x)
-        
         # LIF neuron dynamics (hardware-friendly in hardware_mode, with membrane quantization)
-        spk, mem = lif_update(mem, x, tau=self.tau, threshold=self.threshold, 
-                             alpha=self.alpha, hardware_mode=self.hardware_mode,
+        spk, mem = lif_update(mem, x, decay=self.decay, threshold=self.threshold, 
+                             alpha=self.alpha,
                              quantize_mem=self.quantize_mem, mem_bit_width=self.mem_bit_width)
         return spk, mem
 

@@ -10,22 +10,14 @@ num_bins: 5                         # Event temporal bins - controls temporal hi
                                     # 10 bins = 2x frame period (double temporal history)
 num_timesteps: 5                    # Not used by EventSNNFlowNetLite (uses num_bins instead)
 base_ch: 32                         # Base number of channels in encoder
-tau: 2.0                            # LIF neuron time constant
-threshold: 1.0                      # LIF neuron firing threshold
+decay: 0.5                            # LIF neuron time constant
+threshold: 16.0                      # LIF neuron firing threshold
 alpha: 10.0                         # Surrogate gradient slope (higher = sharper)
-use_bn: false                       # Use batch normalization in spiking blocks
 
 # Quantization Settings (now supported by EventSNNFlowNetLite)
 # Note: Start with quantization OFF for baseline, or use 8-bit as starting point
 quantization_enabled: false        # Enable quantization-aware training
 initial_bit_width: 8               # Bit width for quantization (8 is a good starting point)
-binarize: false                    # Use binary (1-bit) quantization
-
-# Recommended workflow:
-# 1. Train baseline without quantization first (quantization_enabled: false)
-# 2. Fine-tune with 8-bit quantization 
-# 3. Progressively reduce to 4-bit if needed
-# Avoid starting at 32-bit with quantization enabled - defeats the purpose!
 
 # Training Settings
 num_epochs: 100                     # Faster training for prototyping

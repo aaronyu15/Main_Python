@@ -7,10 +7,9 @@ in_channels: 2
 num_bins: 5
 num_timesteps: 5
 base_ch: 32
-tau: 2.0
-threshold: 1.0
+decay: 0.5                            # LIF neuron time constant
+threshold: 16.0                      # LIF neuron firing threshold
 alpha: 10.0
-use_bn: false
 
 # Quantization Settings - 2-bit QAT
 quantize_weights: true              # Enable weight quantization
@@ -18,11 +17,9 @@ quantize_activations: true          # Enable activation quantization
 quantize_mem: true                  # Enable membrane potential quantization
 weight_bit_width: 2                 # Weight quantization bit-width
 act_bit_width: 4                    # Activation quantization bit-width
-binarize: false
 output_bit_width: 16                # Higher precision for output layer (flow prediction)
 first_layer_bit_width: 8            # Keep first layer at 8-bit (much higher than network 2-bit)
 mem_bit_width: 16                   # Higher precision for membrane potential
-hardware_mode: True
 log_params: true                    # Log model parameters and statistics to TensorBoard
 
 # Training Settings - Fine-tuning
@@ -39,10 +36,8 @@ lr_gamma: 0.5
 
 # Loss Weights
 flow_weight: 1.0
+angular_weight: 0.0              # Angular error loss weight (set >0 to enable)
 smooth_weight: 0.1
-sparsity_weight: 0.01
-quant_weight: 0.005                 # Much higher for 2-bit
-target_spike_rate: 0.1
 
 # Data Settings
 data_root: '../blink_sim/output/train'
@@ -57,7 +52,3 @@ max_val_samples: null
 grad_clip: 0.5                      # Tighter clipping for stability
 log_interval: 10
 save_interval: 5
-
-# Hardware Settings
-target_hardware: 'FPGA'
-target_power_budget: 'low'

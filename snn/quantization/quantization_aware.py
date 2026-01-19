@@ -167,27 +167,6 @@ class QuantizationAwareLayer(nn.Module):
         return x_dequant
 
 
-class BinaryQuantizer(nn.Module):
-    """
-    Binary quantizer: quantizes to {-1, +1}
-    Essential for binarized neural networks
-    """
-    def __init__(self, deterministic: bool = True):
-        super().__init__()
-        self.deterministic = deterministic
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Binarize input to {-1, +1}"""
-        if self.deterministic:
-            # Deterministic binarization
-            return BinaryActivation.apply(x)
-        else:
-            # Stochastic binarization
-            prob = (x + 1) / 2  # Map to [0, 1]
-            binary = torch.bernoulli(prob)
-            return 2 * binary - 1  # Map to {-1, +1}
-
-
 class BinaryActivation(torch.autograd.Function):
     """
     Binary activation function with STE
@@ -291,8 +270,6 @@ class QuantizedConv2d(nn.Module):
         kernel_size: int,
         stride: int = 1,
         padding: int = 0,
-        dilation: int = 1,
-        groups: int = 1,
         bias: bool = False,
         weight_bit_width: int = 8,
         act_bit_width: int = 8,
@@ -317,8 +294,7 @@ class QuantizedConv2d(nn.Module):
         # Standard conv layer (weights stored in FP32)
         self.conv = nn.Conv2d(
             in_channels, out_channels, kernel_size,
-            stride=stride, padding=padding, dilation=dilation,
-            groups=groups, bias=bias
+            stride=stride, padding=padding, bias=bias
         )
         
         # Weight scale tracking (per-channel, shape: [out_channels, 1, 1, 1])
@@ -414,8 +390,6 @@ class QuantizedConv2d(nn.Module):
             x, weight, self.conv.bias,
             stride=self.conv.stride,
             padding=self.conv.padding,
-            dilation=self.conv.dilation,
-            groups=self.conv.groups
         )
         
         # Quantize activations (or pass through identity if disabled)

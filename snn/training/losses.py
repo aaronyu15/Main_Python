@@ -31,6 +31,68 @@ def endpoint_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
         return error.mean()
 
 
+def angular_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
+                  valid_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """
+    Compute Angular Error (AE) between predicted and ground truth flow
+    
+    Angular error measures the angle between the 3D vectors (u, v, 1) formed by
+    the flow fields. It's a more perceptually meaningful metric than endpoint error
+    as it considers flow direction, not just magnitude.
+    
+    Args:
+        pred_flow: Predicted flow [B, 2, H, W]
+        gt_flow: Ground truth flow [B, 2, H, W]
+        valid_mask: Valid regions [B, 1, H, W]
+    
+    Returns:
+        Average angular error in degrees
+    """
+    # Extract u and v components
+    pred_u, pred_v = pred_flow[:, 0], pred_flow[:, 1]  # [B, H, W]
+    gt_u, gt_v = gt_flow[:, 0], gt_flow[:, 1]  # [B, H, W]
+    
+    # Compute 3D vector magnitudes: sqrt(u^2 + v^2 + 1)
+    pred_norm = torch.sqrt(pred_u**2 + pred_v**2 + 1.0)
+    gt_norm = torch.sqrt(gt_u**2 + gt_v**2 + 1.0)
+    
+    # Compute dot product: u1*u2 + v1*v2 + 1*1
+    dot_product = pred_u * gt_u + pred_v * gt_v + 1.0
+    
+    # Use numerically stable formulation with atan2 instead of acos
+    # angle = atan2(||a x b||, a · b)
+    # For 3D vectors (u1, v1, 1) and (u2, v2, 1):
+    # Cross product magnitude in the plane perpendicular to z:
+    # ||cross|| = sqrt((v1 - v2)^2 + (u2 - u1)^2 + (u1*v2 - u2*v1)^2)
+    # But we can use a simpler numerically stable form:
+    
+    # Compute cosine and sine components safely
+    cos_angle = dot_product / (pred_norm * gt_norm + 1e-8)
+    
+    # For numerical stability, use atan2 formulation
+    # sin_angle = ||cross_product|| / (norm1 * norm2)
+    # cross_product for (u1,v1,1) x (u2,v2,1) has magnitude:
+    cross_u = pred_v - gt_v  # from the 1*v2 - 1*v1 component
+    cross_v = gt_u - pred_u  # from the u1*1 - u2*1 component
+    cross_z = pred_u * gt_v - pred_v * gt_u  # standard 2D cross product
+    cross_magnitude = torch.sqrt(cross_u**2 + cross_v**2 + cross_z**2 + 1e-8)
+    
+    sin_angle = cross_magnitude / (pred_norm * gt_norm + 1e-8)
+    
+    # Use atan2 for numerical stability (avoids issues at boundaries)
+    angle = torch.atan2(sin_angle, cos_angle)
+    angle_deg = angle * 180.0 / torch.pi
+    
+    if valid_mask is not None:
+        # Squeeze valid_mask if it has channel dimension
+        if valid_mask.dim() == 4:
+            valid_mask = valid_mask.squeeze(1)  # [B, H, W]
+        angle_deg = angle_deg * valid_mask
+        return angle_deg.sum() / (valid_mask.sum() + 1e-8)
+    else:
+        return angle_deg.mean()
+
+
 def flow_loss(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
               valid_mask: Optional[torch.Tensor] = None,
               loss_type: str = 'l1') -> torch.Tensor:
@@ -117,108 +179,7 @@ def multi_scale_flow_loss(flow_pyramid: Dict[str, torch.Tensor],
     return total_loss
 
 
-def smoothness_loss(flow: torch.Tensor) -> torch.Tensor:
-    """
-    Smoothness loss to encourage locally smooth flow fields
-    
-    Args:
-        flow: Flow tensor [B, 2, H, W]
-    
-    Returns:
-        Smoothness loss
-    """
-    # Compute gradients
-    dx = flow[:, :, :, 1:] - flow[:, :, :, :-1]
-    dy = flow[:, :, 1:, :] - flow[:, :, :-1, :]
-    
-    # L1 smoothness
-    smooth_loss = (torch.abs(dx).mean() + torch.abs(dy).mean()) / 2.0
-    
-    return smooth_loss
 
-
-def photometric_loss(img1: torch.Tensor, img2_warped: torch.Tensor,
-                     valid_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-    """
-    Photometric loss for self-supervised learning
-    
-    Args:
-        img1: First image [B, C, H, W]
-        img2_warped: Second image warped by predicted flow [B, C, H, W]
-        valid_mask: Valid regions [B, 1, H, W]
-    
-    Returns:
-        Photometric loss
-    """
-    # Robust photometric loss
-    epsilon = 0.01
-    diff = torch.sqrt((img1 - img2_warped) ** 2 + epsilon ** 2)
-    
-    if valid_mask is not None:
-        diff = diff * valid_mask
-        return diff.sum() / (valid_mask.sum() * img1.shape[1] + 1e-8)
-    else:
-        return diff.mean()
-
-
-class SparsityLoss(nn.Module):
-    """
-    Sparsity loss for SNNs to encourage efficient spiking
-    Important for hardware deployment to reduce power consumption
-    """
-    def __init__(self, target_rate: float = 0.1):
-        """
-        Args:
-            target_rate: Target spike rate (0.0 to 1.0)
-        """
-        super().__init__()
-        self.target_rate = target_rate
-    
-    def forward(self, spike_stats: Dict) -> torch.Tensor:
-        """
-        Compute sparsity loss from spike statistics
-        
-        Args:
-            spike_stats: Dictionary with 'spike_rate' key
-        
-        Returns:
-            Sparsity loss
-        """
-        actual_rate = spike_stats.get('spike_rate', 0.0)
-        
-        # L2 loss between actual and target rate
-        loss = (actual_rate - self.target_rate) ** 2
-        
-        return loss
-
-
-class QuantizationLoss(nn.Module):
-    """
-    Regularization loss to encourage weight distributions
-    suitable for quantization
-    """
-    def __init__(self, weight_decay: float = 1e-4):
-        super().__init__()
-        self.weight_decay = weight_decay
-    
-    def forward(self, model: nn.Module) -> torch.Tensor:
-        """
-        Compute quantization-friendly regularization
-        
-        Args:
-            model: Neural network model
-        
-        Returns:
-            Regularization loss
-        """
-        loss = 0.0
-        
-        for name, param in model.named_parameters():
-            if 'weight' in name:
-                # L2 regularization
-                loss += torch.sum(param ** 2)
-        
-        return self.weight_decay * loss
 
 
 class CombinedLoss(nn.Module):
@@ -228,20 +189,13 @@ class CombinedLoss(nn.Module):
     def __init__(
         self,
         flow_weight: float = 1.0,
-        smooth_weight: float = 0.1,
-        sparsity_weight: float = 0.01,
-        quant_weight: float = 0.0001,
-        target_spike_rate: float = 0.1
+        angular_weight: float = 0.0,
     ):
         super().__init__()
         self.flow_weight = flow_weight
-        self.smooth_weight = smooth_weight
-        self.sparsity_weight = sparsity_weight
-        self.quant_weight = quant_weight
+        self.angular_weight = angular_weight
+
         
-        self.sparsity_loss = SparsityLoss(target_spike_rate)
-        self.quant_loss = QuantizationLoss()
-    
     def forward(
         self,
         outputs: Dict,
@@ -271,27 +225,13 @@ class CombinedLoss(nn.Module):
         else:
             losses['flow_loss'] = flow_loss(outputs['flow'], gt_flow, valid_mask)
         
-        # Smoothness loss
-        losses['smooth_loss'] = smoothness_loss(outputs['flow'])
-        
-        # Sparsity loss (for SNNs)
-        if 'spike_stats' in outputs:
-            losses['sparsity_loss'] = self.sparsity_loss(outputs['spike_stats'])
-        else:
-            losses['sparsity_loss'] = torch.tensor(0.0, device=gt_flow.device)
-        
-        # Quantization regularization
-        if model is not None:
-            losses['quant_loss'] = self.quant_loss(model)
-        else:
-            losses['quant_loss'] = torch.tensor(0.0, device=gt_flow.device)
-        
+        # Angular error loss
+        losses['angular_loss'] = angular_error(outputs['flow'], gt_flow, valid_mask)
+
         # Total loss
         losses['total_loss'] = (
-            self.flow_weight * losses['flow_loss']
-            #self.smooth_weight * losses['smooth_loss'] +
-            #self.sparsity_weight * losses['sparsity_loss']
-            #self.quant_weight * losses['quant_loss']
+            self.flow_weight * losses['flow_loss'] +
+            self.angular_weight * losses['angular_loss']
         )
         
         return losses

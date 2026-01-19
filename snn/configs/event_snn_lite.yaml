@@ -10,19 +10,16 @@ num_bins: 5                         # Event temporal bins - controls temporal hi
                                     # 10 bins = 2x frame period (double temporal history)
 num_timesteps: 5                    # Not used by EventSNNFlowNetLite (uses num_bins instead)
 base_ch: 32                         # Base number of channels in encoder
-tau: 2.0                            # LIF neuron time constant
+decay: 0.5                          # LIF neuron decay factor (0-1, smaller = faster decay)
 threshold: 1.0                      # LIF neuron firing threshold
 alpha: 10.0                         # Surrogate gradient slope (higher = sharper)
-use_bn: false                       # Use batch normalization in spiking blocks
 
 # Quantization Settings (now supported by EventSNNFlowNetLite)
 # Note: Start with quantization OFF for baseline, or use 8-bit as starting point
 quantize_weights: false              # Enable weight quantization
 quantize_activations: false          # Enable activation quantization
 quantize_mem: false                  # Enable membrane potential quantization
-binarize: false
-hardware_mode: false
-log_params: true                    # Log model parameters and statistics to TensorBoard
+log_params: false                    # Log model parameters and statistics to TensorBoard
 
 # Recommended workflow:
 # 1. Train baseline without quantization first (quantization_enabled: false)
@@ -31,7 +28,7 @@ log_params: true                    # Log model parameters and statistics to Ten
 # Avoid starting at 32-bit with quantization enabled - defeats the purpose!
 
 # Training Settings
-num_epochs: 102                   # Faster training for prototyping
+num_epochs: 100                   # Faster training for prototyping
 batch_size: 4                       # Larger batch for small model
 val_batch_size: 4
 num_workers: 8                      # Use 0 to avoid multiprocessing with h5py
@@ -44,10 +41,8 @@ lr_gamma: 0.5
 
 # Loss Weights
 flow_weight: 1.0
+angular_weight: 0.01              # Angular error loss weight (set >0 to enable)
 smooth_weight: 0.1
-sparsity_weight: 0.01
-quant_weight: 0.0001
-target_spike_rate: 0.1
 
 # Data Settings
 data_root: '../blink_sim/output/train' # Path to dataset root directory
@@ -60,8 +55,4 @@ max_val_samples: null
 # Training Loop Settings
 grad_clip: 1.0
 log_interval: 10
-save_interval: 5 
-
-# Hardware Settings
-target_hardware: 'FPGA'
-target_power_budget: 'low'
+save_interval: 5
