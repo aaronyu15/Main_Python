@@ -1,5 +1,5 @@
 """
-Quantization-Aware Fine-tuning Script for EventSNNFlowNetLiteV2
+Quantization-Aware Fine-tuning Script for EventSNNFlowNetLite
 
 This script enables you to:
 1. Load a pre-trained full-precision model from checkpoints/V2/best_model.pth
@@ -32,14 +32,14 @@ import torch
 from pathlib import Path
 from torch.utils.data import DataLoader
 
-from snn.models import EventSNNFlowNetLiteV2
+from snn.models import EventSNNFlowNetLite
 from snn.data import OpticalFlowDataset
 from snn.data.data_utils import Compose, RandomHorizontalFlip, RandomCrop, Normalize
 from snn.training import SNNTrainer
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Quantization-Aware Fine-tuning for EventSNNFlowNetLiteV2')
+    parser = argparse.ArgumentParser(description='Quantization-Aware Fine-tuning for EventSNNFlowNetLite')
     
     parser.add_argument('--config', type=str, required=True,
                       help='Path to quantization configuration file (e.g., snn/configs/event_snn_lite_8bit.yaml)')
@@ -68,22 +68,24 @@ def load_config(config_path: str) -> dict:
 
 def build_quantized_model(config: dict, logger=None) -> torch.nn.Module:
     """Build quantized model from configuration"""
-    model_type = config.get('model_type', 'EventSNNFlowNetLiteV2')
+    model_type = config.get('model_type', 'EventSNNFlowNetLite')
     
-    if model_type != 'EventSNNFlowNetLiteV2':
-        raise ValueError(f"This script only supports EventSNNFlowNetLiteV2, got {model_type}")
+    if model_type != 'EventSNNFlowNetLite':
+        raise ValueError(f"This script only supports EventSNNFlowNetLite, got {model_type}")
     
     # Enable parameter logging (default to True for quantized fine-tuning)
     log_params = config.get('log_params', True)
     
     # Build model with quantization enabled
-    model = EventSNNFlowNetLiteV2(
+    model = EventSNNFlowNetLite(
         base_ch=config.get('base_ch', 32),
         tau=config.get('tau', 2.0),
         threshold=config.get('threshold', 1.0),
         alpha=config.get('alpha', 10.0),
         use_bn=config.get('use_bn', False),
-        quantize=config.get('quantization_enabled', True),  # Enable quantization
+        quantize_weights=config.get('quantize_weights', True),
+        quantize_activations=config.get('quantize_activations', True),
+        quantize_mem=config.get('quantize_mem', True),
         weight_bit_width=config.get('weight_bit_width', 8),
         act_bit_width=config.get('act_bit_width', 8),
         binarize=config.get('binarize', False),
@@ -251,6 +253,10 @@ def main():
     print(f"Pretrained: {args.pretrained}")
     print(f"Weight bit-width: {config.get('weight_bit_width', 8)}-bit")
     print(f"Activation bit-width: {config.get('act_bit_width', 8)}-bit")
+    print(f"Membrane bit-width: {config.get('mem_bit_width', 16)}-bit")
+    print(f"Weight quantization: {config.get('quantize_weights', True)}")
+    print(f"Activation quantization: {config.get('quantize_activations', True)}")
+    print(f"Membrane quantization: {config.get('quantize_mem', True)}")
     print(f"Binarize: {config.get('binarize', False)}")
     if config.get('log_params', True):
         print(f"✓ Model parameters and statistics will be logged to TensorBoard")

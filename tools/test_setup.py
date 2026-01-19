@@ -13,7 +13,7 @@ def test_imports():
     """Test that all modules can be imported"""
     print("Testing imports...")
     try:
-        from snn.models import EventSNNFlowNetLite, EventSNNFlowNetLiteV2
+        from snn.models import EventSNNFlowNetLite
         from snn.quantization import QuantizationAwareLayer, BinaryQuantizer
         from snn.data import OpticalFlowDataset
         from snn.training import SNNTrainer, flow_loss
@@ -31,15 +31,11 @@ def test_model_creation():
     """Test model instantiation"""
     print("\nTesting model creation...")
     try:
-        from snn.models import EventSNNFlowNetLite, EventSNNFlowNetLiteV2
+        from snn.models import EventSNNFlowNetLite
         
         # Test event-based model
         model_event = EventSNNFlowNetLite()
         print(f"✓ EventSNNFlowNetLite created - Parameters: {sum(p.numel() for p in model_event.parameters()):,}")
-
-        # Test event-based model
-        model_event = EventSNNFlowNetLiteV2()
-        print(f"✓ EventSNNFlowNetLiteV2 created - Parameters: {sum(p.numel() for p in model_event.parameters()):,}")
         
         return True
     except Exception as e:
@@ -51,7 +47,7 @@ def test_forward_pass():
     """Test forward pass through model"""
     print("\nTesting forward pass...")
     try:
-        from snn.models import EventSNNFlowNetLiteV2
+        from snn.models import EventSNNFlowNetLite
 
         if not torch.cuda.is_available():
             print("⚠ CUDA not available - using CPU")
@@ -60,7 +56,7 @@ def test_forward_pass():
         print(f"  Using device: {device}")
         
         # Create model
-        model = EventSNNFlowNetLiteV2(
+        model = EventSNNFlowNetLite(
             base_ch=32,
         ).to(device)
         model.eval()

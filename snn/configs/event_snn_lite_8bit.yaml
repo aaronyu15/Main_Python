@@ -1,8 +1,8 @@
-# EventSNNFlowNetLiteV2 - 8-bit Quantization Fine-tuning
+# EventSNNFlowNetLite - 8-bit Quantization Fine-tuning
 # Fine-tune from full-precision checkpoint with 8-bit quantization
 
 # Model Configuration
-model_type: 'EventSNNFlowNetLiteV2'
+model_type: 'EventSNNFlowNetLite'
 in_channels: 2
 num_bins: 5
 num_timesteps: 5
@@ -13,21 +13,23 @@ alpha: 10.0
 use_bn: false
 
 # Quantization Settings - 8-bit QAT
-quantization_enabled: true
+quantize_weights: true              # Enable weight quantization
+quantize_activations: true          # Enable activation quantization
+quantize_mem: true                  # Enable membrane potential quantization
 weight_bit_width: 8                 # Weight quantization bit-width
 act_bit_width: 8                    # Activation quantization bit-width
-binarize: false
-output_bit_width: 16                # Higher precision for output layer (flow prediction)
-first_layer_bit_width: 8            # Keep first layer at 8-bit (same as network)
 mem_bit_width: 16                   # Higher precision for membrane potential
-hardware_mode: True
+first_layer_bit_width: 8            # Keep first layer at 8-bit (same as network)
+output_bit_width: 16                # Higher precision for output layer (flow prediction)
+binarize: false
+hardware_mode: false
 log_params: true                    # Log model parameters and statistics to TensorBoard
 
 # Training Settings - Fine-tuning
-num_epochs: 30                      # Fewer epochs for fine-tuning
-batch_size: 32
-val_batch_size: 32
-num_workers: 32
+num_epochs: 3                      # Fewer epochs for fine-tuning
+batch_size: 4
+val_batch_size: 4
+num_workers: 8
 
 # Optimizer Settings - Lower learning rate for fine-tuning
 learning_rate: 0.00005              # 10x lower than training from scratch
@@ -37,13 +39,14 @@ lr_gamma: 0.5
 
 # Loss Weights
 flow_weight: 1.0
-smooth_weight: 0.1
+smooth_weight: 0.01
 sparsity_weight: 0.01
 quant_weight: 0.001                 # Slightly higher to encourage quantization
 target_spike_rate: 0.1
 
 # Data Settings
-data_root: '../train_set'
+data_root: '../blink_sim/output/train'
+#data_root: '../train_set'
 camera_size: [320, 320]
 use_events: true
 crop_size: [320, 320]

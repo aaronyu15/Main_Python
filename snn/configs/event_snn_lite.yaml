@@ -2,7 +2,7 @@
 # Newer architecture with temporal bin processing and polarity-separated inputs
 
 # Model Configuration
-model_type: 'EventSNNFlowNetLiteV2'   # Event-aware SNN architecture
+model_type: 'EventSNNFlowNetLite'   # Event-aware SNN architecture
 in_channels: 2                       # Polarity channels (positive/negative events)
 num_bins: 5                         # Event temporal bins - controls temporal history length
                                     # 5 bins = 1 frame period (reference)
@@ -17,12 +17,12 @@ use_bn: false                       # Use batch normalization in spiking blocks
 
 # Quantization Settings (now supported by EventSNNFlowNetLite)
 # Note: Start with quantization OFF for baseline, or use 8-bit as starting point
-quantization_enabled: false        # Enable quantization-aware training
-initial_bit_width: 8               # Bit width for quantization (8 is a good starting point)
-binarize: false                    # Use binary (1-bit) quantization
-output_bit_width: 16               # Higher precision for output layer (only used when quantization_enabled: true)
-first_layer_bit_width: 8           # Higher precision for first encoder layer (processes raw events)
-mem_bit_width: 16                  # Bit width for membrane potential quantization
+quantize_weights: false              # Enable weight quantization
+quantize_activations: false          # Enable activation quantization
+quantize_mem: false                  # Enable membrane potential quantization
+binarize: false
+hardware_mode: false
+log_params: true                    # Log model parameters and statistics to TensorBoard
 
 # Recommended workflow:
 # 1. Train baseline without quantization first (quantization_enabled: false)
@@ -31,10 +31,10 @@ mem_bit_width: 16                  # Bit width for membrane potential quantizati
 # Avoid starting at 32-bit with quantization enabled - defeats the purpose!
 
 # Training Settings
-num_epochs: 100                     # Faster training for prototyping
-batch_size: 2                       # Larger batch for small model
-val_batch_size: 2
-num_workers: 0                      # Use 0 to avoid multiprocessing with h5py
+num_epochs: 102                   # Faster training for prototyping
+batch_size: 4                       # Larger batch for small model
+val_batch_size: 4
+num_workers: 8                      # Use 0 to avoid multiprocessing with h5py
 
 # Optimizer Settings
 learning_rate: 0.0002               # Higher LR for faster convergence

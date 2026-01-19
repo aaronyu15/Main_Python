@@ -2,7 +2,7 @@
 # Newer architecture with temporal bin processing and polarity-separated inputs
 
 # Model Configuration
-model_type: 'EventSNNFlowNetLiteV2'   # Event-aware SNN architecture
+model_type: 'EventSNNFlowNetLite'   # Event-aware SNN architecture
 in_channels: 2                       # Polarity channels (positive/negative events)
 num_bins: 5                         # Event temporal bins - controls temporal history length
                                     # 5 bins = 1 frame period (reference)

@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 import sys 
 sys.path.insert(0, '..')
-from snn.models import EventSNNFlowNetLite, EventSNNFlowNetLiteV2
+from snn.models import EventSNNFlowNetLite
 from snn.data import OpticalFlowDataset
 from snn.utils import compute_metrics, visualize_flow, plot_flow_comparison, save_flow_image
 
@@ -45,7 +45,7 @@ def load_model(checkpoint_path: str, device: str):
     
     # Build model
     model_type = config.get('model_type', 'SpikingFlowNet')
-    
+
     if model_type == 'EventSNNFlowNetLite':
         model = EventSNNFlowNetLite(
             base_ch=config.get('base_ch', 32),
@@ -53,27 +53,19 @@ def load_model(checkpoint_path: str, device: str):
             threshold=config.get('threshold', 1.0),
             alpha=config.get('alpha', 10.0),
             use_bn=config.get('use_bn', False),
-            quantize=config.get('quantization_enabled', False),
-            weight_bit_width=config.get('weight_bit_width', 8),
-            act_bit_width=config.get('act_bit_width', 8),
-            binarize=config.get('binarize', False)
-        )
-    elif model_type == 'EventSNNFlowNetLiteV2':
-        model = EventSNNFlowNetLiteV2(
-            base_ch=config.get('base_ch', 32),
-            tau=config.get('tau', 2.0),
-            threshold=config.get('threshold', 1.0),
-            alpha=config.get('alpha', 10.0),
-            use_bn=config.get('use_bn', False),
-            quantize=config.get('quantization_enabled', False),
+            quantize_weights=config.get('quantize_weights', False),
+            quantize_activations=config.get('quantize_activations', False),
+            quantize_mem=config.get('quantize_mem', False),
             weight_bit_width=config.get('weight_bit_width', 8),
             act_bit_width=config.get('act_bit_width', 8),
             binarize=config.get('binarize', False),
+            hardware_mode=config.get('hardware_mode', False),
             output_bit_width=config.get('output_bit_width', 16),
             first_layer_bit_width=config.get('first_layer_bit_width', 8),
-            mem_bit_width=config.get('mem_bit_width', 16)
+            mem_bit_width=config.get('mem_bit_width', 16),
+            enable_logging=config.get('log_params', False),
+            logger=None
         )
-
     
     # Load weights
     model.load_state_dict(checkpoint['model_state_dict'])

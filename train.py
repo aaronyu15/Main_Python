@@ -8,7 +8,7 @@ import torch
 from pathlib import Path
 from torch.utils.data import DataLoader
 
-from snn.models import EventSNNFlowNetLite, EventSNNFlowNetLiteV2
+from snn.models import EventSNNFlowNetLite
 from snn.data import OpticalFlowDataset
 from snn.data.data_utils import Compose, RandomHorizontalFlip, RandomCrop, Normalize
 from snn.training import SNNTrainer
@@ -48,26 +48,15 @@ def build_model(config: dict, logger=None) -> torch.nn.Module:
     log_params = config.get('log_params', False)
     
     if model_type == 'EventSNNFlowNetLite':
-        # EventSNNFlowNetLite uses different parameters
         model = EventSNNFlowNetLite(
             base_ch=config.get('base_ch', 32),
             tau=config.get('tau', 2.0),
             threshold=config.get('threshold', 1.0),
             alpha=config.get('alpha', 10.0),
             use_bn=config.get('use_bn', False),
-            quantize=config.get('quantization_enabled', False),
-            weight_bit_width=config.get('weight_bit_width', 8),
-            act_bit_width=config.get('act_bit_width', 8),
-            binarize=config.get('binarize', False)
-        )
-    elif model_type == 'EventSNNFlowNetLiteV2':
-        model = EventSNNFlowNetLiteV2(
-            base_ch=config.get('base_ch', 32),
-            tau=config.get('tau', 2.0),
-            threshold=config.get('threshold', 1.0),
-            alpha=config.get('alpha', 10.0),
-            use_bn=config.get('use_bn', False),
-            quantize=config.get('quantization_enabled', False),
+            quantize_weights=config.get('quantize_weights', False),
+            quantize_activations=config.get('quantize_activations', False),
+            quantize_mem=config.get('quantize_mem', False),
             weight_bit_width=config.get('weight_bit_width', 8),
             act_bit_width=config.get('act_bit_width', 8),
             binarize=config.get('binarize', False),
@@ -179,8 +168,11 @@ def main():
     print(f"Built model: {config.get('model_type', 'SpikingFlowNet')}")
     
     # Log quantization status
-    if config.get('quantization_enabled', False):
-        print(f"Quantization enabled: W{config.get('weight_bit_width', 8)}A{config.get('act_bit_width', 8)}")
+    if config.get('quantize_weights', False) or config.get('quantize_activations', False) or config.get('quantize_mem', False):
+        print(f"Quantization enabled: W{config.get('weight_bit_width', 8)}A{config.get('act_bit_width', 8)}M{config.get('mem_bit_width', 16)}")
+        print(f"  Weight quantization: {config.get('quantize_weights', False)}")
+        print(f"  Activation quantization: {config.get('quantize_activations', False)}")
+        print(f"  Membrane quantization: {config.get('quantize_mem', False)}")
     if config.get('log_params', False):
         print(f"✓ Model parameters and statistics will be logged to TensorBoard")
     

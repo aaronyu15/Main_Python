@@ -288,10 +288,10 @@ class CombinedLoss(nn.Module):
         
         # Total loss
         losses['total_loss'] = (
-            self.flow_weight * losses['flow_loss'] +
-            self.smooth_weight * losses['smooth_loss'] +
-            self.sparsity_weight * losses['sparsity_loss'] +
-            self.quant_weight * losses['quant_loss']
+            self.flow_weight * losses['flow_loss']
+            #self.smooth_weight * losses['smooth_loss'] +
+            #self.sparsity_weight * losses['sparsity_loss']
+            #self.quant_weight * losses['quant_loss']
         )
         
         return losses

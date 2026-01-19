@@ -1,8 +1,8 @@
-# EventSNNFlowNetLiteV2 - 4-bit Quantization Fine-tuning
+# EventSNNFlowNetLite - 4-bit Quantization Fine-tuning
 # Fine-tune from 8-bit checkpoint with 4-bit quantization
 
 # Model Configuration
-model_type: 'EventSNNFlowNetLiteV2'
+model_type: 'EventSNNFlowNetLite'
 in_channels: 2
 num_bins: 5
 num_timesteps: 5
@@ -13,7 +13,9 @@ alpha: 10.0
 use_bn: false
 
 # Quantization Settings - 4-bit QAT
-quantization_enabled: true
+quantize_weights: true              # Enable weight quantization
+quantize_activations: true          # Enable activation quantization
+quantize_mem: true                  # Enable membrane potential quantization
 weight_bit_width: 4                 # Weight quantization bit-width
 act_bit_width: 4                    # Activation quantization bit-widthbinarize: false
 output_bit_width: 16                # Higher precision for output layer (flow prediction)
@@ -23,10 +25,10 @@ hardware_mode: True
 log_params: true                    # Log model parameters and statistics to TensorBoard
 
 # Training Settings - Fine-tuning
-num_epochs: 30
-batch_size: 32
-val_batch_size: 32
-num_workers: 32
+num_epochs: 3
+batch_size: 4
+val_batch_size: 4
+num_workers: 8
 
 # Optimizer Settings - Even lower learning rate for aggressive quantization
 learning_rate: 0.00002              # Lower for 4-bit stability
@@ -42,7 +44,8 @@ quant_weight: 0.002                 # Higher weight for 4-bit
 target_spike_rate: 0.1
 
 # Data Settings
-data_root: '../train_set'
+data_root: '../blink_sim/output/train'
+#data_root: '../train_set'
 camera_size: [320, 320]
 use_events: true
 crop_size: [320, 320]

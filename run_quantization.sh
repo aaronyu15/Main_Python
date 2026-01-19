@@ -1,6 +1,5 @@
 #!/bin/bash
 # Quick Start Script for Quantization-Aware Fine-tuning
-# This script demonstrates the recommended workflow for quantizing your EventSNNFlowNetLiteV2 model
 
 set -e  # Exit on error
 

@@ -138,7 +138,9 @@ class SpikingConvBlock(nn.Module):
         alpha=10.0,
         use_bn=False,
         groups=1,
-        quantize=False,
+        quantize_weights=False,
+        quantize_activations=False,
+        quantize_mem=False,
         weight_bit_width=8,
         act_bit_width=8,
         hardware_mode=False,
@@ -150,7 +152,9 @@ class SpikingConvBlock(nn.Module):
         super().__init__()
         
         # Quantization support - use QuantizedConv2d for full quantization
-        self.quantize = quantize
+        self.quantize_weights = quantize_weights
+        self.quantize_activations = quantize_activations
+        self.quantize_mem = quantize_mem
         self.weight_bit_width = weight_bit_width
         self.act_bit_width = act_bit_width
         self.hardware_mode = hardware_mode
@@ -164,8 +168,8 @@ class SpikingConvBlock(nn.Module):
             groups=groups, bias=not use_bn,
             weight_bit_width=weight_bit_width,
             act_bit_width=act_bit_width,
-            quantize_weights=quantize,
-            quantize_activations=quantize,
+            quantize_weights=quantize_weights,
+            quantize_activations=quantize_activations,
             enable_logging=enable_logging,
             layer_name=layer_name,
             logger=logger
@@ -187,6 +191,6 @@ class SpikingConvBlock(nn.Module):
         # LIF neuron dynamics (hardware-friendly in hardware_mode, with membrane quantization)
         spk, mem = lif_update(mem, x, tau=self.tau, threshold=self.threshold, 
                              alpha=self.alpha, hardware_mode=self.hardware_mode,
-                             quantize_mem=self.quantize, mem_bit_width=self.mem_bit_width)
+                             quantize_mem=self.quantize_mem, mem_bit_width=self.mem_bit_width)
         return spk, mem
 

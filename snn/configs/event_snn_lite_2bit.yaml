@@ -1,8 +1,8 @@
-# EventSNNFlowNetLiteV2 - 2-bit Quantization Fine-tuning
+# EventSNNFlowNetLite - 2-bit Quantization Fine-tuning
 # Fine-tune from 4-bit checkpoint with 2-bit quantization
 
 # Model Configuration
-model_type: 'EventSNNFlowNetLiteV2'
+model_type: 'EventSNNFlowNetLite'
 in_channels: 2
 num_bins: 5
 num_timesteps: 5
@@ -13,9 +13,11 @@ alpha: 10.0
 use_bn: false
 
 # Quantization Settings - 2-bit QAT
-quantization_enabled: true
+quantize_weights: true              # Enable weight quantization
+quantize_activations: true          # Enable activation quantization
+quantize_mem: true                  # Enable membrane potential quantization
 weight_bit_width: 2                 # Weight quantization bit-width
-act_bit_width: 2                    # Activation quantization bit-width
+act_bit_width: 4                    # Activation quantization bit-width
 binarize: false
 output_bit_width: 16                # Higher precision for output layer (flow prediction)
 first_layer_bit_width: 8            # Keep first layer at 8-bit (much higher than network 2-bit)
@@ -24,10 +26,10 @@ hardware_mode: True
 log_params: true                    # Log model parameters and statistics to TensorBoard
 
 # Training Settings - Fine-tuning
-num_epochs: 40                      # More epochs for extreme quantization
-batch_size: 32
-val_batch_size: 32
-num_workers: 32
+num_epochs: 4                      # More epochs for extreme quantization
+batch_size: 4
+val_batch_size: 4
+num_workers: 8
 
 # Optimizer Settings - Very low learning rate for extreme quantization
 learning_rate: 0.00001
@@ -43,7 +45,8 @@ quant_weight: 0.005                 # Much higher for 2-bit
 target_spike_rate: 0.1
 
 # Data Settings
-data_root: '../train_set'
+data_root: '../blink_sim/output/train'
+#data_root: '../train_set'
 camera_size: [320, 320]
 use_events: true
 crop_size: [320, 320]

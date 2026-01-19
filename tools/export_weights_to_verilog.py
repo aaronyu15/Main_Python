@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""Export quantized EventSNNFlowNetLiteV2 weights for SystemVerilog.
+"""Export quantized EventSNNFlowNetLite weights for SystemVerilog.
 
 Python-side QAT in this repo uses *fake quantization*:
 - Weights: symmetric quantization in the forward pass (see QuantizedWeight)

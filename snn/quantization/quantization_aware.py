@@ -108,7 +108,7 @@ class QuantizationAwareLayer(nn.Module):
         
         # Use running statistics with peak floor to prevent collapse
         # Floor prevents EMA from decaying too far when sparse activations occur
-        effective_min = torch.max(self.running_min, self.peak_min * 0.5)  # Allow EMA to be at most 50% of peak
+        effective_min = torch.min(self.running_min, self.peak_min * 0.5)  # Allow EMA to be at most 50% of peak
         effective_max = torch.max(self.running_max, self.peak_max * 0.5)
         
         # Compute scale and zero-point
@@ -121,7 +121,7 @@ class QuantizationAwareLayer(nn.Module):
             zero_point = effective_min
         
         # Enforce minimum scale to prevent collapse (increased from 1e-4 to 0.01)
-        min_scale = 0.01  # More aggressive floor for SNN stability
+        min_scale = 1e-4  # More aggressive floor for SNN stability
         scale = torch.clamp(scale, min=min_scale)
         
         # Fake quantization: quantize then dequantize (only if quantize flag is True)
@@ -394,6 +394,13 @@ class QuantizedConv2d(nn.Module):
         # Log quantized/processed weight statistics to TensorBoard (regardless of quantization mode)
         if self.enable_logging and self.training and self.logger is not None and self.forward_count % 100 == 0:
             with torch.no_grad():
+                self.logger.log_scalars(f'params/{self.layer_name}/layer/input', {
+                    'min': x.min().item(),
+                    'max': x.max().item(),
+                    'mean': x.mean().item(),
+                    'std': x.std().item()
+                }, self.forward_count)
+
                 self.logger.log_scalars(f'params/{self.layer_name}/weights', {
                     'min': weight.min().item(),
                     'max': weight.max().item(),

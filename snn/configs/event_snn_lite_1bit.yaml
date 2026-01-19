@@ -1,8 +1,8 @@
-# EventSNNFlowNetLiteV2 - 1-bit (Binary) Quantization Fine-tuning
+# EventSNNFlowNetLite - 1-bit (Binary) Quantization Fine-tuning
 # Fine-tune from 2-bit checkpoint with binary quantization
 
 # Model Configuration
-model_type: 'EventSNNFlowNetLiteV2'
+model_type: 'EventSNNFlowNetLite'
 in_channels: 2
 num_bins: 5
 num_timesteps: 5
@@ -13,7 +13,9 @@ alpha: 10.0
 use_bn: false
 
 # Quantization Settings - Binary (1-bit) QAT
-quantization_enabled: true
+quantize_weights: true              # Enable weight quantization
+quantize_activations: true          # Enable activation quantization
+quantize_mem: true                  # Enable membrane potential quantization
 weight_bit_width: 1                 # Weight quantization bit-width (binary)
 act_bit_width: 1                    # Activation quantization bit-width (binary)
 binarize: true
