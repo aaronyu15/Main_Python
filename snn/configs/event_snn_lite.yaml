@@ -21,12 +21,6 @@ quantize_activations: false          # Enable activation quantization
 quantize_mem: false                  # Enable membrane potential quantization
 log_params: false                    # Log model parameters and statistics to TensorBoard
 
-# Recommended workflow:
-# 1. Train baseline without quantization first (quantization_enabled: false)
-# 2. Fine-tune with 8-bit quantization 
-# 3. Progressively reduce to 4-bit if needed
-# Avoid starting at 32-bit with quantization enabled - defeats the purpose!
-
 # Training Settings
 num_epochs: 100                   # Faster training for prototyping
 batch_size: 4                       # Larger batch for small model

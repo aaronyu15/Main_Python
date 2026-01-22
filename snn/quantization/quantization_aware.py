@@ -135,7 +135,7 @@ class QuantizationAwareLayer(nn.Module):
             x_dequant = x
             
         # Log statistics to TensorBoard if enabled (regardless of quantization mode)
-        if self.enable_logging and self.training and self.logger is not None and self.forward_count % 100 == 0:
+        if self.enable_logging and self.logger is not None and self.forward_count % 100 == 0:
             with torch.no_grad():
                 # Log activation statistics
                 self.logger.log_scalars(f'params/{self.layer_name}/activations/input', {
@@ -215,36 +215,32 @@ class QuantizedWeight(torch.autograd.Function):
     for better accuracy compared to per-tensor scaling.
     """
     @staticmethod
-    def forward(ctx, weight, bit_width):
+    def forward(ctx, weight, bit_width, scale=None):
         # Per-channel (per-output-filter) quantization
         # Shape: [out_ch, in_ch, kH, kW] -> scale per out_ch
-        
-        # Calculate per-channel max absolute value
-        # Need to flatten spatial and input channel dimensions for max
-        w_reshaped = weight.abs().view(weight.size(0), -1)  # [out_ch, in_ch*kH*kW]
-        max_abs = w_reshaped.max(dim=1, keepdim=True)[0].unsqueeze(-1).unsqueeze(-1)  # [out_ch, 1, 1, 1]
-        
+
         # Symmetric quantization range
         qmax = 2 ** (bit_width - 1) - 1
-        
-        # Calculate scale
-        scale = max_abs / qmax
+
+        # Allow passing a precomputed per-channel scale (e.g., EMA/peak-tracked).
+        if scale is None:
+            # Calculate per-channel max absolute value
+            w_reshaped = weight.abs().view(weight.size(0), -1)  # [out_ch, in_ch*kH*kW]
+            max_abs = w_reshaped.max(dim=1, keepdim=True)[0].unsqueeze(-1).unsqueeze(-1)  # [out_ch, 1, 1, 1]
+            scale = max_abs / qmax
+
         scale = torch.clamp(scale, min=1e-8)  # Avoid division by zero
-        
-        # Quantize
+
+        # Quantize then dequantize
         w_q = weight / scale
         w_q = torch.clamp(w_q, -qmax, qmax)
         w_q = w_q.round()
-        
-        # Dequantize
-        w_dequant = w_q * scale
-        
-        return w_dequant
+        return w_q * scale
     
     @staticmethod
     def backward(ctx, grad_output):
         # Straight-through estimator
-        return grad_output, None
+        return grad_output, None, None
 
 
 class QuantizedConv2d(nn.Module):
@@ -286,6 +282,7 @@ class QuantizedConv2d(nn.Module):
         self.act_bit_width = act_bit_width
         self.quantize_weights = quantize_weights
         self.quantize_activations = quantize_activations
+
         self.enable_logging = enable_logging
         self.layer_name = layer_name
         self.logger = logger
@@ -315,60 +312,66 @@ class QuantizedConv2d(nn.Module):
             quantize=quantize_activations  # Pass quantization flag
         )
     
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # -----------------------------
+    # Helpers
+    # -----------------------------
+    def _qmax(self) -> int:
+        return 2 ** (self.weight_bit_width - 1) - 1
+
+    @torch.no_grad()
+    def _update_weight_scales(self):
+        # current_max: [out,1,1,1]
+        w = self.conv.weight.abs().view(self.conv.weight.size(0), -1)
+        current_max = w.max(dim=1, keepdim=True)[0].unsqueeze(-1).unsqueeze(-1)
+
+        qmax = self._qmax()
+        current_scale = current_max / qmax
+        current_scale = torch.clamp(current_scale, min=1e-4)
+
+        if not self.weight_scale_initialized:
+            self.weight_running_scale.copy_(current_scale)
+            self.weight_peak_scale.copy_(current_scale)
+            self.weight_scale_initialized.fill_(True)
+        elif self.training:
+            ema = self.weight_scale_ema
+            self.weight_running_scale.mul_(ema).add_(current_scale * (1 - ema))
+            self.weight_peak_scale.copy_(torch.maximum(self.weight_peak_scale, current_scale))
+
+    def _quantize_weight(self) -> torch.Tensor:
         """
-        Forward pass with quantized weights and activations
+        Returns the weight tensor to use in conv (quantized or not),
+        preserving your exact logic and STE behavior.
         """
-        # Quantize weights if enabled (using weight_bit_width)
-        if self.quantize_weights and self.weight_bit_width > 1:
-            # Multi-bit weight quantization with EMA scale and peak tracking
-            with torch.no_grad():
-                # Calculate current per-channel max absolute value
-                w_reshaped = self.conv.weight.abs().view(self.conv.weight.size(0), -1)
-                current_max = w_reshaped.max(dim=1, keepdim=True)[0].unsqueeze(-1).unsqueeze(-1)
-                
-                qmax = 2 ** (self.weight_bit_width - 1) - 1
-                current_scale = current_max / qmax
-                current_scale = torch.clamp(current_scale, min=1e-4)
-                
-                # Initialize or update scale statistics
-                if not self.weight_scale_initialized:
-                    # First time: initialize both running and peak
-                    self.weight_running_scale.copy_(current_scale)
-                    self.weight_peak_scale.copy_(current_scale)
-                    self.weight_scale_initialized.fill_(True)
-                elif self.training:
-                    # Update EMA running scale
-                    self.weight_running_scale.mul_(self.weight_scale_ema).add_(
-                        current_scale * (1 - self.weight_scale_ema)
-                    )
-                    # Update peak (never decreases)
-                    self.weight_peak_scale.copy_(torch.maximum(
-                        self.weight_peak_scale, current_scale
-                    ))
-            
-            # Use floor mechanism: scale can't drop below 50% of peak
+        if not self.quantize_weights:
+            return self.conv.weight
+
+        # Binary case
+        if self.weight_bit_width == 1:
+            return BinaryWeight.apply(self.conv.weight)
+
+        # Multi-bit case
+        if self.weight_bit_width > 1:
+            self._update_weight_scales()
+
             effective_scale = torch.maximum(
                 self.weight_running_scale,
                 self.weight_peak_scale * 0.5
             )
-            
-            # Quantize using effective scale
-            qmax = 2 ** (self.weight_bit_width - 1) - 1
-            w_q = self.conv.weight / effective_scale
-            w_q = torch.clamp(w_q, -qmax, qmax)
-            w_q = StraightThroughEstimator.apply(w_q.round())
-            weight = w_q * effective_scale
-            
-        elif self.quantize_weights and self.weight_bit_width == 1:
-            # Binary weight quantization
-            weight = BinaryWeight.apply(self.conv.weight)
-        else:
-            # No weight quantization
-            weight = self.conv.weight
+
+            # Use QuantizedWeight autograd op for STE-safe quantization.
+            return QuantizedWeight.apply(self.conv.weight, self.weight_bit_width, effective_scale)
+
+        return self.conv.weight
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass with quantized weights and activations
+        """
+
+        weight = self._quantize_weight()
         
         # Log quantized/processed weight statistics to TensorBoard (regardless of quantization mode)
-        if self.enable_logging and self.training and self.logger is not None and self.forward_count % 100 == 0:
+        if self.enable_logging  and self.logger is not None and self.forward_count % 100 == 0:
             with torch.no_grad():
                 self.logger.log_scalars(f'params/{self.layer_name}/layer/input', {
                     'min': x.min().item(),

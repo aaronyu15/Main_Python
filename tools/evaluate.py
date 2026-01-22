@@ -22,7 +22,7 @@ def parse_args():
     
     parser.add_argument('--checkpoint', type=str, required=True,
                       help='Path to model checkpoint')
-    parser.add_argument('--data-root', type=str, default='../blink_sim/output',
+    parser.add_argument('--data-root', type=str, default='../../blink_sim/output/train',
                       help='Root directory for dataset')
     parser.add_argument('--output-dir', type=str, default='./results',
                       help='Directory to save results')
@@ -32,11 +32,13 @@ def parse_args():
                       help='Number of samples to evaluate (None = all)')
     parser.add_argument('--device', type=str, default='cuda',
                       help='Device to use (cuda or cpu)')
+    parser.add_argument('--log-dir', type=str, default='./logs',
+                      help='Directory for logs')
     
     return parser.parse_args()
 
 
-def load_model(checkpoint_path: str, device: str):
+def load_model(checkpoint_path: str, device: str, logger: None):
     """Load model from checkpoint"""
     checkpoint = torch.load(checkpoint_path, map_location=device)
     
@@ -49,7 +51,7 @@ def load_model(checkpoint_path: str, device: str):
     if model_type == 'EventSNNFlowNetLite':
         model = EventSNNFlowNetLite(
             base_ch=config.get('base_ch', 32),
-            tau=config.get('tau', 2.0),
+            decay=config.get('decay', 0.5),
             threshold=config.get('threshold', 1.0),
             alpha=config.get('alpha', 10.0),
             quantize_weights=config.get('quantize_weights', False),
@@ -60,8 +62,8 @@ def load_model(checkpoint_path: str, device: str):
             output_bit_width=config.get('output_bit_width', 16),
             first_layer_bit_width=config.get('first_layer_bit_width', 8),
             mem_bit_width=config.get('mem_bit_width', 16),
-            enable_logging=config.get('log_params', False),
-            logger=None
+            enable_logging=True,#,config.get('log_params', False),
+            logger=logger
         )
     
     # Load weights
@@ -87,8 +89,12 @@ def evaluate(args):
     device = args.device if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
     
+    # Create logger first (needed for quantization logging)
+    from snn.utils.logger import Logger
+    logger = Logger(log_dir=args.log_dir)
+
     # Load model
-    model, config = load_model(args.checkpoint, device)
+    model, config = load_model(args.checkpoint, device, logger)
     
     # Build dataset
     dataset = OpticalFlowDataset(

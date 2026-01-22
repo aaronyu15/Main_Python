@@ -11,8 +11,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
 from pathlib import Path
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
 import yaml
+import csv
 
 import sys 
 sys.path.insert(0, '..')
@@ -50,7 +51,7 @@ def load_model_from_checkpoint(
     if model_type == 'EventSNNFlowNetLite':
         model = EventSNNFlowNetLite(
             base_ch=config.get('base_ch', 32),
-            tau=config.get('tau', 2.0),
+            decay=config.get('decay', 2.0),
             threshold=config.get('threshold', 1.0),
             alpha=config.get('alpha', 10.0),
             quantize_weights=config.get('quantize_weights', False),

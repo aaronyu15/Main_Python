@@ -8,7 +8,7 @@ num_bins: 5
 num_timesteps: 5
 base_ch: 32
 decay: 0.5                            # LIF neuron time constant
-threshold: 16.0                      # LIF neuron firing threshold
+threshold: 1.0                      # LIF neuron firing threshold
 alpha: 10.0
 
 # Quantization Settings - 8-bit QAT
@@ -23,7 +23,7 @@ output_bit_width: 16                # Higher precision for output layer (flow pr
 log_params: true                    # Log model parameters and statistics to TensorBoard
 
 # Training Settings - Fine-tuning
-num_epochs: 3                      # Fewer epochs for fine-tuning
+num_epochs: 5                      # Fewer epochs for fine-tuning
 batch_size: 4
 val_batch_size: 4
 num_workers: 8
