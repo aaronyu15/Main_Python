@@ -14,8 +14,7 @@ def test_imports():
     print("Testing imports...")
     try:
         from snn.models import EventSNNFlowNetLite
-        from snn.quantization import QuantizationAwareLayer, BinaryQuantizer
-        from snn.data import OpticalFlowDataset
+        from snn.dataset import OpticalFlowDataset
         from snn.training import SNNTrainer, flow_loss
         from snn.utils import Logger, compute_metrics, visualize_flow
         print("✓ All imports successful!")
@@ -86,41 +85,18 @@ def test_forward_pass():
         return False
 
 
-def test_quantization():
-    """Test quantization layers"""
-    print("\nTesting quantization...")
-    try:
-        from snn.quantization import QuantizationAwareLayer, BinaryQuantizer
-        
-        # Test QAT layer
-        qat = QuantizationAwareLayer(bit_width=8)
-        x = torch.randn(4, 64, 32, 32)
-        x_quant = qat(x)
-        print(f"✓ 8-bit quantization successful")
-        
-        # Test binary quantizer
-        binary = BinaryQuantizer()
-        x_binary = binary(x)
-        assert torch.all((x_binary == 1) | (x_binary == -1)), "Binary output should be {-1, +1}"
-        print(f"✓ Binary quantization successful")
-        
-        return True
-    except Exception as e:
-        print(f"✗ Quantization test failed: {e}")
-        return False
-
 
 def test_data_loading():
     """Test data loading"""
     print("\nTesting data loading...")
     try:
-        from snn.data import OpticalFlowDataset
+        from snn.dataset import OpticalFlowDataset
         
         # Try to load dataset
-        data_root = Path("../blink_sim/output")
+        data_root = Path("../../blink_sim/output/train_set")
         if not data_root.exists():
             print(f"⚠ Dataset not found at {data_root} - skipping data loading test")
-            return True
+            return False
         
         dataset = OpticalFlowDataset(
             data_root=str(data_root),
@@ -146,7 +122,7 @@ def test_data_loading():
         print(f"✗ Data loading failed: {e}")
         import traceback
         traceback.print_exc()
-        return True  # Don't fail if dataset isn't available
+        return False  # Don't fail if dataset isn't available
 
 
 def test_gpu_computation():
@@ -281,10 +257,7 @@ def test_config_loading():
         import yaml
         
         configs = [
-            'snn/configs/baseline.yaml',
-            'snn/configs/quantization_aware.yaml',
-            'snn/configs/binary_snn.yaml',
-            'snn/configs/lightweight.yaml'
+            '../snn/configs/event_snn_lite.yaml',
         ]
         
         for config_path in configs:
@@ -318,7 +291,6 @@ def main():
         ("Import Test", test_imports),
         ("Model Creation", test_model_creation),
         ("Forward Pass", test_forward_pass),
-        ("Quantization", test_quantization),
         ("GPU Computation", test_gpu_computation),
         ("Data Loading", test_data_loading),
         ("Config Loading", test_config_loading)

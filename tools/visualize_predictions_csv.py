@@ -395,6 +395,7 @@ def create_flow_animation_from_csv(
         
         # Convert to voxel grid
         voxel_grid = events_to_voxel_grid(window_events, num_bins, height, width)
+        print(torch.min(voxel_grid), torch.max(voxel_grid), torch.mean(voxel_grid))
         
         # Run inference
         flow_pred = run_inference(model, voxel_grid, device)

@@ -13,7 +13,7 @@ from tqdm import tqdm
 import sys 
 sys.path.insert(0, '..')
 from snn.models import EventSNNFlowNetLite
-from snn.data import OpticalFlowDataset
+from snn.dataset import OpticalFlowDataset
 from snn.utils import compute_metrics, visualize_flow, plot_flow_comparison, save_flow_image
 
 

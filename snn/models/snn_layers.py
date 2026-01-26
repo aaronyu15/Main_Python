@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple
-
+from .quant_layers import *
 
 # -------------------------
 # Surrogate spike function
@@ -134,7 +134,6 @@ class SpikingConvBlock(nn.Module):
         
         # Always use QuantizedConv2d for consistent structure
         # When quantize=False, it acts as a standard conv
-        from ..quantization import QuantizedConv2d
         self.conv = QuantizedConv2d(
             in_ch, out_ch, kernel_size=k, stride=s, padding=p, 
             weight_bit_width=weight_bit_width,

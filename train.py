@@ -9,8 +9,7 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 
 from snn.models import EventSNNFlowNetLite
-from snn.data import OpticalFlowDataset
-from snn.data.data_utils import Compose, RandomHorizontalFlip, RandomCrop, Normalize
+from snn.dataset import OpticalFlowDataset
 from snn.training import SNNTrainer
 
 
@@ -73,18 +72,6 @@ def build_dataloaders(config: dict, data_root: str = None):
     if data_root is None:
         data_root = config.get('data_root', '../blink_sim/output')
     
-    # Data transforms
-    train_transform = Compose([
-        RandomHorizontalFlip(p=0.5),
-        RandomCrop(crop_size=config.get('crop_size', (320, 320))),
-        Normalize()
-    ])
-    
-    val_transform = Compose([
-        # Validation uses center crop (no random cropping)
-        # Note: Dataset will apply _center_crop if no crop transform is present
-        Normalize()
-    ])
     
     # Get number of event bins (use num_bins if specified, otherwise fall back to in_channels)
     num_event_bins = config.get('num_bins', config.get('in_channels', 5))

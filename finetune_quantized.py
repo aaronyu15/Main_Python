@@ -34,7 +34,6 @@ from torch.utils.data import DataLoader
 
 from snn.models import EventSNNFlowNetLite
 from snn.data import OpticalFlowDataset
-from snn.data.data_utils import Compose, RandomHorizontalFlip, RandomCrop, Normalize
 from snn.training import SNNTrainer
 
 

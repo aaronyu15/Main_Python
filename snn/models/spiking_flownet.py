@@ -7,21 +7,8 @@ import torch
 import torch.nn as nn
 from typing import Dict, List, Optional, Tuple
 from .snn_layers import SpikingConvBlock
-from ..quantization import QuantizedConv2d
+from .quant_layers import QuantizedConv2d
 import torch.nn.functional as F
-
-
-def skip_update(state, x, shift_k: int):
-    """
-    state <- state + (x - state) / 2^k   (hardware: add + sub + >>k)
-    If shift_k=0 => state=x immediately.
-    """
-    if state is None:
-        return x
-    if shift_k == 0:
-        return x
-    return state + x 
-
 
 class EventSNNFlowNetLite(nn.Module):
     """
