@@ -13,77 +13,14 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
 from pathlib import Path
 from typing import Dict, Tuple, Optional, List
-import yaml
 import csv
+import sys
 
-import sys 
-sys.path.insert(0, '..')
-from snn.models import EventSNNFlowNetLite
-from snn.utils.visualization import visualize_flow, flow_to_color
+# Add parent directory to path to import from utils and snn
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-
-def load_config(config_path: str) -> dict:
-    """Load configuration from YAML file"""
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    return config
-
-
-def load_model_from_checkpoint(
-    checkpoint_path: str,
-    config: dict,
-    device: torch.device
-) -> torch.nn.Module:
-    """
-    Load trained model from checkpoint
-    
-    Args:
-        checkpoint_path: Path to checkpoint file
-        config: Model configuration dictionary
-        device: Device to load model on
-    
-    Returns:
-        Loaded model in eval mode
-    """
-    # Build model architecture
-    model_type = config.get('model_type', 'SpikingFlowNet')
-
-    if model_type == 'EventSNNFlowNetLite':
-        model = EventSNNFlowNetLite(
-            base_ch=config.get('base_ch', 32),
-            decay=config.get('decay', 2.0),
-            threshold=config.get('threshold', 1.0),
-            alpha=config.get('alpha', 10.0),
-            quantize_weights=config.get('quantize_weights', False),
-            quantize_activations=config.get('quantize_activations', False),
-            quantize_mem=config.get('quantize_mem', False),
-            weight_bit_width=config.get('weight_bit_width', 8),
-            act_bit_width=config.get('act_bit_width', 8),
-            output_bit_width=config.get('output_bit_width', 16),
-            first_layer_bit_width=config.get('first_layer_bit_width', 8),
-            mem_bit_width=config.get('mem_bit_width', 16),
-            enable_logging=config.get('log_params', False),
-            logger=None
-        )
-
-    
-    # Load checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    
-    # Handle different checkpoint formats
-    if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-        print(f"Loaded checkpoint from epoch {checkpoint.get('epoch', 'unknown')}")
-        val_epe = checkpoint.get('val_epe', None)
-        if val_epe is not None:
-            print(f"Validation EPE: {val_epe:.4f}")
-    else:
-        model.load_state_dict(checkpoint)
-    
-    model = model.to(device)
-    model.eval()
-    
-    return model
+from utils import load_config, build_model
+from snn.utils import flow_to_color, visualize_events
 
 
 def load_events_from_csv(csv_path: str) -> np.ndarray:
@@ -277,23 +214,8 @@ def visualize_event_flow(
     max_flow = max(np.sqrt((flow_pred**2).sum(axis=0)).max(), 1.0)
     
     # Input events - visualize by polarity (red=positive, blue=negative)
-    # Sum across time bins: [num_bins, 2, H, W] -> [2, H, W]
-    event_sum = input_events.sum(axis=0)  # [2, H, W]
-    pos_events = event_sum[0]  # Positive events
-    neg_events = event_sum[1]  # Negative events
-    
-    h, w = pos_events.shape
-    event_rgb = np.zeros((h, w, 3), dtype=np.float32)
-    
-    # Positive events -> red channel
-    if pos_events.max() > 0:
-        event_rgb[:, :, 0] = pos_events / (pos_events.max() * 0.5)
-    
-    # Negative events -> blue channel
-    if neg_events.max() > 0:
-        event_rgb[:, :, 2] = neg_events / (neg_events.max() * 0.5)
-    
-    event_rgb = np.clip(event_rgb, 0, 1)
+    event_rgb = visualize_events(input_events)
+    h, w = event_rgb.shape[:2]
     axes[0].imshow(event_rgb)
     axes[0].set_title('Input Events (red=pos, blue=neg)')
     axes[0].axis('off')
@@ -428,19 +350,8 @@ def create_flow_animation_from_csv(
             ax.clear()
         
         # Input events
-        event_sum = voxel_grid.sum(axis=0)  # [2, H, W]
-        pos_events = event_sum[0]
-        neg_events = event_sum[1]
-        
-        h, w = pos_events.shape
-        event_rgb = np.zeros((h, w, 3), dtype=np.float32)
-        
-        if pos_events.max() > 0:
-            event_rgb[:, :, 0] = pos_events / (pos_events.max() * 0.5)
-        if neg_events.max() > 0:
-            event_rgb[:, :, 2] = neg_events / (neg_events.max() * 0.5)
-        
-        event_rgb = np.clip(event_rgb, 0, 1)
+        event_rgb = visualize_events(voxel_grid)
+        h, w = event_rgb.shape[:2]
         axes[0].imshow(event_rgb)
         axes[0].set_title(f'Events ({frame_data["num_events"]} events)')
         axes[0].axis('off')
@@ -595,7 +506,7 @@ def main():
     
     # Load model
     print(f"\nLoading model from {args.checkpoint}")
-    model = load_model_from_checkpoint(args.checkpoint, config, device)
+    model, _ = build_model(config, device=str(device), train=False, checkpoint_path=args.checkpoint)
     print(f"Model loaded successfully on {device}")
     
     # Create animation

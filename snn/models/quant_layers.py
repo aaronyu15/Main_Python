@@ -54,7 +54,7 @@ class QuantizedConv2d(nn.Module):
         Forward pass with quantized weights and activations
         """
 
-        if self.quantize_weights:
+        if self.quantize_weights and self.weight_bit_width < 32:
             weight = self.weight_quant(self.conv.weight)
         else:
             weight = self.conv.weight
@@ -67,7 +67,7 @@ class QuantizedConv2d(nn.Module):
             padding=self.conv.padding,
         )
         
-        if self.quantize_activations:   
+        if self.quantize_activations and self.act_bit_width < 32:   
             out_act = self.act_quant(out)
         else:
             out_act = out

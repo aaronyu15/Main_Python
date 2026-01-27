@@ -281,6 +281,52 @@ def plot_flow_comparison(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
     plt.close()
 
 
+def visualize_events(event_voxel: np.ndarray, brightness_scale: float = 0.5) -> np.ndarray:
+    """
+    Visualize event voxel grid as RGB image (red=positive, blue=negative events)
+    
+    Args:
+        event_voxel: Event voxel grid in one of two formats:
+            - [num_bins, 2, H, W] - polarity-separated (channel 0=positive, 1=negative)
+            - [num_bins, H, W] - old format with signed values
+        brightness_scale: Scale factor for brightness (default 0.5 gives 2x brightness boost)
+    
+    Returns:
+        RGB image [H, W, 3] in range [0, 1]
+    """
+    # Convert to numpy if needed
+    if isinstance(event_voxel, torch.Tensor):
+        event_voxel = event_voxel.detach().cpu().numpy()
+    
+    # Handle both voxel grid formats
+    if event_voxel.ndim == 4:  # [num_bins, 2, H, W] - polarity-separated
+        event_sum = event_voxel.sum(axis=0)  # [2, H, W]
+        pos_events = event_sum[0]  # Positive events
+        neg_events = event_sum[1]  # Negative events
+    elif event_voxel.ndim == 3:  # [num_bins, H, W] - old voxel grid format
+        event_sum = event_voxel.sum(axis=0)  # [H, W]
+        pos_events = np.maximum(event_sum, 0)
+        neg_events = np.maximum(-event_sum, 0)
+    else:
+        raise ValueError(f"Expected event_voxel to have 3 or 4 dimensions, got {event_voxel.ndim}")
+    
+    h, w = pos_events.shape
+    event_rgb = np.zeros((h, w, 3), dtype=np.float32)
+    
+    # Positive events -> red channel
+    if pos_events.max() > 0:
+        event_rgb[:, :, 0] = pos_events / (pos_events.max() * brightness_scale)
+    
+    # Negative events -> blue channel
+    if neg_events.max() > 0:
+        event_rgb[:, :, 2] = neg_events / (neg_events.max() * brightness_scale)
+    
+    # Clip to valid range
+    event_rgb = np.clip(event_rgb, 0, 1)
+    
+    return event_rgb
+
+
 def visualize_spike_activity(spike_tensor: torch.Tensor, save_path: Optional[str] = None):
     """
     Visualize spike activity over time

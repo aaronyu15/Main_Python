@@ -1,10 +1,3 @@
-"""
-Visualization script for testing trained SNN optical flow models
-
-This script loads a trained model, runs inference on dataset samples,
-and creates visualizations comparing ground truth with predictions.
-"""
-
 import argparse
 import torch
 import numpy as np
@@ -12,102 +5,22 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
 from pathlib import Path
 from typing import Dict, Tuple, Optional, List
-import yaml
-import csv
+import sys
 
-import sys 
-sys.path.insert(0, '..')
-from snn.models import EventSNNFlowNetLite
-from snn.data import OpticalFlowDataset
-from snn.utils.visualization import visualize_flow, flow_to_color
+# Add parent directory to path to import from utils and snn
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-
-def load_config(config_path: str) -> dict:
-    """Load configuration from YAML file"""
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    return config
-
-
-def load_model_from_checkpoint(
-    checkpoint_path: str,
-    config: dict,
-    device: torch.device
-) -> torch.nn.Module:
-    """
-    Load trained model from checkpoint
-    
-    Args:
-        checkpoint_path: Path to checkpoint file
-        config: Model configuration dictionary
-        device: Device to load model on
-    
-    Returns:
-        Loaded model in eval mode
-    """
-    # Build model architecture
-    model_type = config.get('model_type', 'SpikingFlowNet')
-
-    if model_type == 'EventSNNFlowNetLite':
-        model = EventSNNFlowNetLite(
-            base_ch=config.get('base_ch', 32),
-            decay=config.get('decay', 2.0),
-            threshold=config.get('threshold', 1.0),
-            alpha=config.get('alpha', 10.0),
-            quantize_weights=config.get('quantize_weights', False),
-            quantize_activations=config.get('quantize_activations', False),
-            quantize_mem=config.get('quantize_mem', False),
-            weight_bit_width=config.get('weight_bit_width', 8),
-            act_bit_width=config.get('act_bit_width', 8),
-            output_bit_width=config.get('output_bit_width', 16),
-            first_layer_bit_width=config.get('first_layer_bit_width', 8),
-            mem_bit_width=config.get('mem_bit_width', 16),
-            enable_logging=config.get('log_params', False),
-            logger=None
-        )
-
-    
-    # Load checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    
-    # Handle different checkpoint formats
-    if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-        print(f"Loaded checkpoint from epoch {checkpoint.get('epoch', 'unknown')}")
-        val_epe = checkpoint.get('val_epe', None)
-        if val_epe is not None:
-            print(f"Validation EPE: {val_epe:.4f}")
-    else:
-        model.load_state_dict(checkpoint)
-    
-    model = model.to(device)
-    model.eval()
-    
-    return model
+from utils import load_config, build_model
+from snn.dataset import OpticalFlowDataset
+from snn.utils import flow_to_color, visualize_events
 
 
 def load_dataset(config: dict, data_root: Optional[str] = None) -> OpticalFlowDataset:
-    """
-    Load dataset for inference
-    
-    Args:
-        config: Configuration dictionary
-        data_root: Override data root path
-    
-    Returns:
-        Dataset instance
-    """
-    
-    # Get number of event bins (use num_bins if specified, otherwise fall back to in_channels)
-    num_event_bins = config.get('num_bins', config.get('in_channels', 5))
     
     dataset = OpticalFlowDataset(
         data_root=data_root,
-        split='train',  # Can visualize train or val samples
-        transform=None,  # No augmentation for visualization
         use_events=config.get('use_events', True),
-        num_bins=num_event_bins,
-        crop_size=config.get('crop_size', (256, 256)),
+        num_bins=config.get('num_bins', 5),
         max_samples=None  # Load all samples
     )
     
@@ -370,30 +283,7 @@ def create_flow_animation(
             ax.clear()
         
         # Input events - visualize by polarity (red=positive, blue=negative)
-        # Handle both old [num_bins, H, W] and new [num_bins, 2, H, W] formats
-        if input_events.ndim == 4:  # [num_bins, 2, H, W] - polarity-separated
-            # Sum across time bins: [num_bins, 2, H, W] -> [2, H, W]
-            event_sum = input_events.sum(axis=0)  # [2, H, W]
-            pos_events = event_sum[0]  # Positive events
-            neg_events = event_sum[1]  # Negative events
-        else:  # [num_bins, H, W] - old voxel grid format
-            event_sum = input_events.sum(axis=0)  # [H, W]
-            pos_events = np.maximum(event_sum, 0)
-            neg_events = np.maximum(-event_sum, 0)
-        
-        # Create RGB image: red for positive, blue for negative
-        h, w = pos_events.shape
-        event_rgb = np.zeros((h, w, 3), dtype=np.float32)
-        
-        # Positive events -> red channel
-        if pos_events.max() > 0:
-            event_rgb[:, :, 0] = pos_events / (pos_events.max() * 0.5)  # Enhanced brightness
-        
-        # Negative events -> blue channel
-        if neg_events.max() > 0:
-            event_rgb[:, :, 2] = neg_events / (neg_events.max() * 0.5)  # Enhanced brightness
-        
-        event_rgb = np.clip(event_rgb, 0, 1)
+        event_rgb = visualize_events(input_events)
         axes[0].imshow(event_rgb)
         axes[0].set_title(f'Events (Frame {metadata["index"]:03d})')
         axes[0].axis('off')
@@ -527,7 +417,7 @@ def main():
     
     # Load model
     print(f"Loading model from {args.checkpoint}")
-    model = load_model_from_checkpoint(args.checkpoint, config, device)
+    model, _ = build_model(config, device=str(device), train=False, checkpoint_path=args.checkpoint)
     print(f"Model loaded successfully on {device}")
     
     # Load dataset

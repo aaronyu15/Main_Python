@@ -21,8 +21,7 @@ def endpoint_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
     Returns:
         Average endpoint error
     """
-    # Compute L2 distance with numerical stability
-    error = torch.sqrt(torch.sum((pred_flow - gt_flow) ** 2, dim=1, keepdim=True) + 1e-8)
+    error = torch.norm(pred_flow - gt_flow, p=2, dim=1, keepdim=True) 
     
     if valid_mask is not None:
         error = error * valid_mask
