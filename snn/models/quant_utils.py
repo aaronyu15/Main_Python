@@ -3,12 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Any
 
-class StraightThroughEstimator(torch.autograd.Function):
-    """
-    Straight-Through Estimator for quantization
-    Forward: Quantize
-    Backward: Pass gradient through unchanged
-    """
+class STE(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input):
         return input.round()
@@ -16,7 +11,6 @@ class StraightThroughEstimator(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         return grad_output
-
 
 class BinaryActivation(torch.autograd.Function):
     """
@@ -58,37 +52,140 @@ class BinaryWeight(torch.autograd.Function):
         return grad_output
 
 
-class QuantizedWeight(torch.autograd.Function):
-    """
-    Multi-bit weight quantization with per-channel scaling
-    
-    Uses symmetric quantization with per-channel (per-filter) scaling
-    for better accuracy compared to per-tensor scaling.
-    """
-    @staticmethod
-    def forward(ctx, weight, bit_width, scale=None):
-        # Per-channel (per-output-filter) quantization
-        # Shape: [out_ch, in_ch, kH, kW] -> scale per out_ch
 
-        # Symmetric quantization range
+def compute_mse_scale(weight: torch.Tensor, bit_width: int) -> torch.Tensor:
+    qmin = -(2 ** (bit_width - 1))
+    qmax = 2 ** (bit_width - 1) - 1
+    min_val = weight.min()
+    max_val = weight.max()
+    scale = (max_val - min_val) / (qmax - qmin)
+    scale = torch.clamp(scale, min=1e-8)
+    return scale
+
+
+class SymmetricQuant(torch.autograd.Function):
+    # Use symmetric x quantization, no zero-point
+    @staticmethod
+    def forward(ctx, x, bit_width, scale=None, zero_point=None, type="max", per_channel=False):
+        # Shape: [out_ch, in_ch, kH, kW] 
+
         qmax = 2 ** (bit_width - 1) - 1
 
-        # Allow passing a precomputed per-channel scale (e.g., EMA/peak-tracked).
         if scale is None:
-            # Calculate per-channel max absolute value
-            w_reshaped = weight.abs().view(weight.size(0), -1)  # [out_ch, in_ch*kH*kW]
-            max_abs = w_reshaped.max(dim=1, keepdim=True)[0].unsqueeze(-1).unsqueeze(-1)  # [out_ch, 1, 1, 1]
-            scale = max_abs / qmax
 
-        scale = torch.clamp(scale, min=1e-8)  # Avoid division by zero
+            if type == "max":
+                if per_channel:
+                    # Calculate per-channel max absolute value
+                    x_flat = x.view(x.size(0), -1)  # [out_ch, in_ch*kH*kW]
+                    scale_val = torch.max(x_flat.abs(), dim=1, keepdim=True)[0].unsqueeze(-1).unsqueeze(-1)  # [out_ch, 1, 1, 1]
+                else:
+                    max_abs = x.abs().max()
+                    scale_val = max_abs
+
+            elif type == "mse":
+                pass
+
+            scale = scale_val / qmax
 
         # Quantize then dequantize
-        w_q = weight / scale
-        w_q = torch.clamp(w_q, -qmax, qmax)
-        w_q = w_q.round()
-        return w_q * scale
+        x_q = x / scale
+        x_q = torch.clamp(x_q, -qmax-1, qmax)
+        x_q = x_q.round()
+
+        return x_q, scale, None
     
     @staticmethod
     def backward(ctx, grad_output):
-        # Straight-through estimator
-        return grad_output, None, None
+        return grad_output, None, None, None, None, None
+
+class AsymmetricQuant(torch.autograd.Function):
+    # Use asymmetric quantization, zero-point
+    @staticmethod
+    def forward(ctx, x, bit_width, scale=None, zero_point=None, type="max", per_channel=False):
+        # Shape: [out_ch, in_ch, kH, kW] 
+
+        qmax = 2 ** bit_width - 1
+
+
+        if type == "max":
+            if per_channel:
+                # Calculate per-channel max absolute value
+                x_flat = x.view(x.size(0), -1)  # [out_ch, in_ch*kH*kW]
+                max_val = torch.max(x_flat, dim=1, keepdim=True)[0].unsqueeze(-1).unsqueeze(-1)  # [out_ch, 1, 1, 1]
+                min_val = torch.min(x_flat, dim=1, keepdim=True)[0].unsqueeze(-1).unsqueeze(-1)  # [out_ch, 1, 1, 1]
+                scale_val = max_val - min_val
+
+                zero_point_calc = torch.min(x_flat, dim=1, keepdim=True)[0].unsqueeze(-1).unsqueeze(-1)  # [out_ch, 1, 1, 1]
+            else:
+                max_val = torch.max(x)  
+                min_val = torch.min(x)  
+
+                scale_val = max_val - min_val
+                zero_point_calc = torch.min(x)
+
+        elif type == "mse":
+            pass
+
+        scale_calc = scale_val / qmax
+
+        # Quantize then dequantize
+        if scale is None:
+            scale = scale_calc
+            zero_point = zero_point_calc
+
+        x_q = x / scale + zero_point
+        x_q = torch.clamp(x_q, -qmax-1, qmax)
+        x_q = x_q.round()
+
+        # Return new calculations
+        return x_q, scale_calc, zero_point_calc
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output, None, None, None, None, None
+
+class QuantAct(nn.Module):
+    def __init__(
+        self,
+        bit_width: int = 8,
+        symmetric: bool = True,
+        layer_name: str = "qact",
+        quantize: bool = True  
+    ):
+        super().__init__()
+        
+        self.bit_width = bit_width
+        self.symmetric = symmetric
+        self.layer_name = layer_name
+        self.quantize = quantize
+        self.forward_count = 0
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            x_q, s, z = AsymmetricQuant.apply(x)
+
+        return x_q, s, z
+
+class QuantWeight(nn.Module):
+    def __init__(
+        self,
+        bit_width: int = 8,
+        symmetric: bool = True,
+        layer_name: str = "qweight",
+    ):
+        super().__init__()
+        
+        self.bit_width = bit_width
+        self.symmetric = symmetric
+        self.layer_name = layer_name
+        self.forward_count = 0
+        
+    def forward(self, w: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            w_q, s, z = SymmetricQuant.apply(w)
+            
+    
+        return w_q, s, z
+
+def QuantMembrane():
+    pass

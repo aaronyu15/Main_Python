@@ -5,30 +5,7 @@ Metrics for optical flow evaluation
 import torch
 import numpy as np
 from typing import Dict, Optional, Tuple
-
-
-def calculate_epe(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
-                  valid_mask: Optional[torch.Tensor] = None) -> float:
-    """
-    Calculate Average Endpoint Error (EPE)
-    
-    Args:
-        pred_flow: Predicted flow [B, 2, H, W] or [2, H, W]
-        gt_flow: Ground truth flow [B, 2, H, W] or [2, H, W]
-        valid_mask: Valid mask [B, 1, H, W] or [1, H, W]
-    
-    Returns:
-        Average endpoint error
-    """
-    # Compute L2 error
-    error = torch.sqrt(torch.sum((pred_flow - gt_flow) ** 2, dim=-3 if pred_flow.dim() == 4 else 0))
-    
-    if valid_mask is not None:
-        valid_mask = valid_mask.squeeze(-3 if valid_mask.dim() == 4 else 0)
-        error = error * valid_mask
-        return (error.sum() / (valid_mask.sum() + 1e-8)).item()
-    else:
-        return error.mean().item()
+from ..training.losses import angular_error, endpoint_error
 
 
 def calculate_outliers(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
@@ -49,73 +26,20 @@ def calculate_outliers(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
         Percentage of outliers
     """
     # Compute endpoint error
-    epe = torch.sqrt(torch.sum((pred_flow - gt_flow) ** 2, dim=-3 if pred_flow.dim() == 4 else 0))
+    epe = torch.sqrt(torch.sum((pred_flow - gt_flow) ** 2, dim=1))
     
     # Ground truth magnitude
-    gt_mag = torch.sqrt(torch.sum(gt_flow ** 2, dim=-3 if gt_flow.dim() == 4 else 0))
+    gt_mag = torch.sqrt(torch.sum(gt_flow ** 2, dim=1 ))
     
     # Outlier mask: EPE > threshold AND EPE > 5% of GT magnitude
     outliers = (epe > threshold) & (epe > 0.05 * gt_mag)
     
     if valid_mask is not None:
-        valid_mask = valid_mask.squeeze(-3 if valid_mask.dim() == 4 else 0)
+        valid_mask = valid_mask.squeeze(1)
         outliers = outliers * valid_mask
         return (outliers.sum() / (valid_mask.sum() + 1e-8) * 100).item()
     else:
         return (outliers.float().mean() * 100).item()
-
-
-def calculate_angular_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
-                           valid_mask: Optional[torch.Tensor] = None) -> float:
-    """
-    Calculate average angular error
-    
-    Args:
-        pred_flow: Predicted flow [B, 2, H, W] or [2, H, W]
-        gt_flow: Ground truth flow [B, 2, H, W] or [2, H, W]
-        valid_mask: Valid mask
-    
-    Returns:
-        Average angular error in degrees
-    """
-    # Add dimension for 3D vectors [u, v, 1]
-    if pred_flow.dim() == 3:
-        pred_flow = pred_flow.unsqueeze(0)
-        gt_flow = gt_flow.unsqueeze(0)
-        squeeze_output = True
-    else:
-        squeeze_output = False
-    
-    batch_size = pred_flow.shape[0]
-    
-    # Create 3D vectors
-    pred_vec = torch.cat([
-        pred_flow,
-        torch.ones(batch_size, 1, pred_flow.shape[2], pred_flow.shape[3], device=pred_flow.device)
-    ], dim=1)
-    
-    gt_vec = torch.cat([
-        gt_flow,
-        torch.ones(batch_size, 1, gt_flow.shape[2], gt_flow.shape[3], device=gt_flow.device)
-    ], dim=1)
-    
-    # Normalize
-    pred_vec = pred_vec / (torch.norm(pred_vec, dim=1, keepdim=True) + 1e-8)
-    gt_vec = gt_vec / (torch.norm(gt_vec, dim=1, keepdim=True) + 1e-8)
-    
-    # Dot product
-    dot_product = torch.sum(pred_vec * gt_vec, dim=1)
-    dot_product = torch.clamp(dot_product, -1.0, 1.0)
-    
-    # Angular error
-    angular_error = torch.acos(dot_product) * 180.0 / np.pi
-    
-    if valid_mask is not None:
-        valid_mask = valid_mask.squeeze(1)
-        angular_error = angular_error * valid_mask
-        return (angular_error.sum() / (valid_mask.sum() + 1e-8)).item()
-    else:
-        return angular_error.mean().item()
 
 
 def compute_metrics(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
@@ -132,51 +56,14 @@ def compute_metrics(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
         Dictionary of metrics
     """
     metrics = {
-        'epe': calculate_epe(pred_flow, gt_flow, valid_mask),
+        'epe': endpoint_error(pred_flow, gt_flow, valid_mask),
         'outliers': calculate_outliers(pred_flow, gt_flow, valid_mask, threshold=3.0),
-        'angular_error': calculate_angular_error(pred_flow, gt_flow, valid_mask)
+        'angular_error': angular_error(pred_flow, gt_flow, valid_mask)
     }
     
     return metrics
 
 
-def compute_metrics_by_magnitude(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
-                                 valid_mask: Optional[torch.Tensor] = None,
-                                 bins: list = [0, 10, 40, float('inf')]) -> Dict[str, Dict[str, float]]:
-    """
-    Compute metrics stratified by flow magnitude
-    
-    Args:
-        pred_flow: Predicted flow
-        gt_flow: Ground truth flow
-        valid_mask: Valid mask
-        bins: Magnitude bins
-    
-    Returns:
-        Dictionary of metrics for each bin
-    """
-    # Compute ground truth magnitude
-    gt_mag = torch.sqrt(torch.sum(gt_flow ** 2, dim=-3 if gt_flow.dim() == 4 else 0))
-    
-    results = {}
-    
-    for i in range(len(bins) - 1):
-        bin_min, bin_max = bins[i], bins[i+1]
-        
-        # Create mask for this magnitude bin
-        bin_mask = (gt_mag >= bin_min) & (gt_mag < bin_max)
-        
-        if valid_mask is not None:
-            bin_mask = bin_mask & valid_mask.squeeze(-3 if valid_mask.dim() == 4 else 0).bool()
-        
-        bin_mask = bin_mask.unsqueeze(-3 if pred_flow.dim() == 4 else 0).float()
-        
-        # Compute metrics for this bin
-        if bin_mask.sum() > 0:
-            bin_name = f'{bin_min}-{bin_max}' if bin_max != float('inf') else f'{bin_min}+'
-            results[bin_name] = compute_metrics(pred_flow, gt_flow, bin_mask)
-        
-    return results
 
 
 def calculate_effective_epe(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
@@ -196,13 +83,13 @@ def calculate_effective_epe(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
         EPE for effective pixels only
     """
     # Compute GT flow magnitude
-    gt_mag = torch.sqrt(torch.sum(gt_flow ** 2, dim=-3 if gt_flow.dim() == 4 else 0))
+    gt_mag = torch.sqrt(torch.sum(gt_flow ** 2, dim=1))
     
     # Create mask for effective pixels (where flow is significant)
     effective_mask = (gt_mag > threshold)
     
     if valid_mask is not None:
-        valid_mask_2d = valid_mask.squeeze(-3 if valid_mask.dim() == 4 else 0)
+        valid_mask_2d = valid_mask.squeeze(1)
         effective_mask = effective_mask & valid_mask_2d.bool()
     
     # If no effective pixels, return 0
@@ -210,10 +97,10 @@ def calculate_effective_epe(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
         return 0.0
     
     # Expand mask to match flow dimensions
-    effective_mask = effective_mask.unsqueeze(-3 if pred_flow.dim() == 4 else 0).float()
+    effective_mask = effective_mask.unsqueeze(1).float()
     
     # Compute EPE only for effective pixels
-    return calculate_epe(pred_flow, gt_flow, effective_mask)
+    return endpoint_error(pred_flow, gt_flow, effective_mask)
 
 
 def calculate_percentile_epe(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
@@ -233,11 +120,11 @@ def calculate_percentile_epe(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
         Dictionary with EPE and threshold value
     """
     # Compute GT flow magnitude
-    gt_mag = torch.sqrt(torch.sum(gt_flow ** 2, dim=-3 if gt_flow.dim() == 4 else 0))
+    gt_mag = torch.sqrt(torch.sum(gt_flow ** 2, dim=1))
     
     # Get valid pixels
     if valid_mask is not None:
-        valid_mask_2d = valid_mask.squeeze(-3 if valid_mask.dim() == 4 else 0)
+        valid_mask_2d = valid_mask.squeeze(1)
         valid_gt_mag = gt_mag[valid_mask_2d.bool()]
     else:
         valid_gt_mag = gt_mag.flatten()
@@ -256,10 +143,10 @@ def calculate_percentile_epe(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
         percentile_mask = percentile_mask & valid_mask_2d.bool()
     
     # Expand mask to match flow dimensions
-    percentile_mask = percentile_mask.unsqueeze(-3 if pred_flow.dim() == 4 else 0).float()
+    percentile_mask = percentile_mask.unsqueeze(1).float()
     
     # Compute EPE for these pixels
-    epe = calculate_epe(pred_flow, gt_flow, percentile_mask)
+    epe = endpoint_error(pred_flow, gt_flow, percentile_mask)
     num_pixels = int(percentile_mask.sum().item())
     
     return {

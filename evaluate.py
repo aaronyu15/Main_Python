@@ -10,11 +10,11 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-import sys 
-sys.path.insert(0, '..')
 from snn.models import EventSNNFlowNetLite
 from snn.dataset import OpticalFlowDataset
 from snn.utils import compute_metrics, visualize_flow, plot_flow_comparison, save_flow_image
+
+from utils import *
 
 
 def parse_args():
@@ -38,46 +38,6 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_model(checkpoint_path: str, device: str, logger: None):
-    """Load model from checkpoint"""
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    
-    # Get config
-    config = checkpoint.get('config', {})
-    
-    # Build model
-    model_type = config.get('model_type', 'SpikingFlowNet')
-
-    if model_type == 'EventSNNFlowNetLite':
-        model = EventSNNFlowNetLite(
-            base_ch=config.get('base_ch', 32),
-            decay=config.get('decay', 0.5),
-            threshold=config.get('threshold', 1.0),
-            alpha=config.get('alpha', 10.0),
-            quantize_weights=config.get('quantize_weights', False),
-            quantize_activations=config.get('quantize_activations', False),
-            quantize_mem=config.get('quantize_mem', False),
-            weight_bit_width=config.get('weight_bit_width', 8),
-            act_bit_width=config.get('act_bit_width', 8),
-            output_bit_width=config.get('output_bit_width', 16),
-            first_layer_bit_width=config.get('first_layer_bit_width', 8),
-            mem_bit_width=config.get('mem_bit_width', 16),
-            enable_logging=True,#,config.get('log_params', False),
-            logger=logger
-        )
-    
-    # Load weights
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model = model.to(device)
-    model.eval()
-    
-    print(f"Loaded model from {checkpoint_path}")
-    print(f"Model trained for {checkpoint.get('epoch', 'unknown')} epochs")
-    print(f"Best validation EPE: {checkpoint.get('best_val_epe', 'unknown')}")
-    
-    return model, config
-
-
 def evaluate(args):
     """Main evaluation function"""
     
@@ -89,9 +49,6 @@ def evaluate(args):
     device = args.device if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
     
-    # Create logger first (needed for quantization logging)
-    from snn.utils.logger import Logger
-    logger = Logger(log_dir=args.log_dir)
 
     # Load model
     model, config = load_model(args.checkpoint, device, logger)

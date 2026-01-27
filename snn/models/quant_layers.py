@@ -1,287 +1,80 @@
-"""
-Quantization-Aware Training for SNNs
-Supports variable bit-width quantization with hardware deployment in mind
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Any
 from .quant_utils import *
 
-class QuantizationAwareLayer(nn.Module):
-    """
-    Fake Quantization layer for Quantization-Aware Training
-    
-    Uses exponential moving average (EMA) to track activation statistics
-    during training, similar to PyTorch's FakeQuantize.
-    
-    Args:
-        bit_width: Number of bits for quantization (1 for binary)
-        symmetric: Use symmetric quantization around zero
-        ema_decay: Decay factor for exponential moving average (0.9-0.999)
-    """
-    def __init__(
-        self,
-        bit_width: int = 8,
-        symmetric: bool = True,
-        ema_decay: float = 0.9,
-        enable_logging: bool = False,
-        layer_name: str = "unknown",
-        logger: Optional[Any] = None,  # TensorBoard logger instance
-        quantize: bool = True  # Whether to actually quantize or just log
-    ):
-        super().__init__()
-        
-        self.bit_width = bit_width
-        self.symmetric = symmetric
-        self.ema_decay = ema_decay
-        self.enable_logging = enable_logging
-        self.layer_name = layer_name
-        self.logger = logger
-        self.quantize = quantize
-        self.forward_count = 0
-        
-        # Quantization levels
-        if symmetric:
-            self.qmin = -(2 ** (bit_width - 1))
-            self.qmax = 2 ** (bit_width - 1) - 1
-        else:
-            self.qmin = 0
-            self.qmax = 2 ** bit_width - 1
-        
-        # Running statistics for scale/zero-point (like BatchNorm)
-        self.register_buffer('running_min', torch.tensor(0.0))
-        self.register_buffer('running_max', torch.tensor(1.0))
-        self.register_buffer('num_batches_tracked', torch.tensor(0))
-        
-        # Track peak values to prevent collapse (critical for SNNs with sparse activations)
-        self.register_buffer('peak_min', torch.tensor(0.0))
-        self.register_buffer('peak_max', torch.tensor(1.0))
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply fake quantization with EMA statistics tracking"""
-        
-        if self.training:
-            # Update running statistics using EMA
-            # CRITICAL FOR SNNs: Only update if there are non-zero activations
-            # to prevent collapse when most activations are zero (no spikes)
-            with torch.no_grad():
-                # Check if we have meaningful activations
-                abs_max = x.abs().max()
-                
-                if abs_max > 1e-3:  # Only update if there are actual spikes/activations
-                    min_val = x.min()
-                    max_val = x.max()
-                    
-                    if self.num_batches_tracked == 0:
-                        # Initialize both running and peak statistics
-                        self.running_min = min_val
-                        self.running_max = max_val
-                        self.peak_min = min_val
-                        self.peak_max = max_val
-                    else:
-                        # Update EMA statistics (faster decay for SNNs)
-                        self.running_min = self.ema_decay * self.running_min + (1 - self.ema_decay) * min_val
-                        self.running_max = self.ema_decay * self.running_max + (1 - self.ema_decay) * max_val
-                        
-                        # Update peak statistics (never decay, only expand)
-                        self.peak_min = torch.min(self.peak_min, min_val)
-                        self.peak_max = torch.max(self.peak_max, max_val)
-                    
-                    self.num_batches_tracked += 1
-        
-        # Use running statistics with peak floor to prevent collapse
-        # Floor prevents EMA from decaying too far when sparse activations occur
-        effective_min = torch.min(self.running_min, self.peak_min * 0.5)  # Allow EMA to be at most 50% of peak
-        effective_max = torch.max(self.running_max, self.peak_max * 0.5)
-        
-        # Compute scale and zero-point
-        if self.symmetric:
-            max_abs = torch.max(torch.abs(effective_min), torch.abs(effective_max))
-            scale = max_abs / (2 ** (self.bit_width - 1) - 1)
-            zero_point = 0.0
-        else:
-            scale = (effective_max - effective_min) / (2 ** self.bit_width - 1)
-            zero_point = effective_min
-        
-        # Enforce minimum scale to prevent collapse (increased from 1e-4 to 0.01)
-        min_scale = 1e-4  # More aggressive floor for SNN stability
-        scale = torch.clamp(scale, min=min_scale)
-        
-        # Fake quantization: quantize then dequantize (only if quantize flag is True)
-        if self.quantize and scale > 1e-8:  # Avoid division by zero
-            x_q = (x - zero_point) / scale
-            x_q = torch.clamp(x_q, self.qmin, self.qmax)
-            x_q = StraightThroughEstimator.apply(x_q)
-            x_dequant = x_q * scale + zero_point
-        else:
-            # No quantization, pass through as-is
-            x_dequant = x
-            
-        # Log statistics to TensorBoard if enabled (regardless of quantization mode)
-        if self.enable_logging and self.logger is not None and self.forward_count % 100 == 0:
-            with torch.no_grad():
-                # Log activation statistics
-                self.logger.log_scalars(f'params/{self.layer_name}/activations/input', {
-                    'min': x.min().item(),
-                    'max': x.max().item(),
-                    'mean': x.mean().item(),
-                    'std': x.std().item()
-                }, self.forward_count)
-                
-                self.logger.log_scalars(f'params/{self.layer_name}/activations/output', {
-                    'min': x_dequant.min().item(),
-                    'max': x_dequant.max().item(),
-                    'mean': x_dequant.mean().item(),
-                    'std': x_dequant.std().item()
-                }, self.forward_count)
-                
-                # Log quantization parameters (even if not quantizing, shows what they would be)
-                self.logger.log_scalars(f'params/{self.layer_name}/activations/params', {
-                    'scale': scale.item(),
-                    'running_max': self.running_max.item(),
-                    'peak_max': self.peak_max.item(),
-                }, self.forward_count)
-                
-                # Log histogram of activations
-                self.logger.log_histogram(f'params/{self.layer_name}/activations/input_hist', x, self.forward_count)
-                self.logger.log_histogram(f'params/{self.layer_name}/activations/output_hist', x_dequant, self.forward_count)
-        
-        self.forward_count += 1
-        return x_dequant
-
-
 
 class QuantizedConv2d(nn.Module):
-    """
-    Quantized Conv2d that quantizes both weights and activations
-    
-    This is the proper way to do QAT for hardware deployment:
-    - Weights are quantized during forward pass (stored as FP32, quantized on-the-fly)
-    - Activations are quantized after convolution
-    - Both use straight-through estimators for gradients
-    
-    Args:
-        Same as nn.Conv2d, plus:
-        weight_bit_width: Bit-width for weight quantization
-        act_bit_width: Bit-width for activation quantization
-        quantize_weights: Enable weight quantization
-        quantize_activations: Enable activation quantization
-    """
     def __init__(
         self,
         in_channels: int,
         out_channels: int,
-        kernel_size: int,
-        stride: int = 1,
-        padding: int = 0,
+        k: int,
+        s: int = 1,
+        p: int = 0,
         bias: bool = False,
+        config: Optional[dict] = None,
         weight_bit_width: int = 8,
         act_bit_width: int = 8,
-        quantize_weights: bool = True,
-        quantize_activations: bool = True,
-        enable_logging: bool = False,
         layer_name: str = "conv",
-        logger: Optional[Any] = None  # TensorBoard logger instance
     ):
         super().__init__()
+        self.layer_name = layer_name
         
         # Separate bit-widths for weights and activations
         self.weight_bit_width = weight_bit_width
         self.act_bit_width = act_bit_width
-        self.quantize_weights = quantize_weights
-        self.quantize_activations = quantize_activations
 
-        self.enable_logging = enable_logging
-        self.layer_name = layer_name
-        self.logger = logger
+        self.quantize_weights = config.get('quantize_weights', False)
+        self.quantize_activations = config.get('quantize_activations', False)
+
+        self.enable_logging_params = config.get('enable_logging_params', False)
+        self.logger = None
+
         self.forward_count = 0
         
-        # Standard conv layer (weights stored in FP32)
         self.conv = nn.Conv2d(
-            in_channels, out_channels, kernel_size,
-            stride=stride, padding=padding, bias=bias
+            in_channels, out_channels, k,
+            s, p, bias=bias
         )
-        
-        # Weight scale tracking (per-channel, shape: [out_channels, 1, 1, 1])
-        # Uses EMA with peak floor to prevent collapse
+
         if self.quantize_weights:
-            self.register_buffer('weight_running_scale', torch.ones(out_channels, 1, 1, 1))
-            self.register_buffer('weight_peak_scale', torch.ones(out_channels, 1, 1, 1))
-            self.register_buffer('weight_scale_initialized', torch.tensor(False))
-            self.weight_scale_ema = 0.9  # EMA decay for weight scale
+            self.weight_quant = QuantWeight()
         
-        # Activation quantization layer (always present for logging)
-        # When quantization is disabled, it still logs but doesn't quantize
-        self.act_quant = QuantizationAwareLayer(
-            bit_width=self.act_bit_width,
-            enable_logging=enable_logging,
-            layer_name=layer_name,  # Use base layer name, not layer_name_act
-            logger=logger,
-            quantize=quantize_activations  # Pass quantization flag
-        )
-    
-        # -----------------------------
-    # Helpers
-    # -----------------------------
-    def _qmax(self) -> int:
-        return 2 ** (self.weight_bit_width - 1) - 1
-
-    @torch.no_grad()
-    def _update_weight_scales(self):
-        # current_max: [out,1,1,1]
-        w = self.conv.weight.abs().view(self.conv.weight.size(0), -1)
-        current_max = w.max(dim=1, keepdim=True)[0].unsqueeze(-1).unsqueeze(-1)
-
-        qmax = self._qmax()
-        current_scale = current_max / qmax
-        current_scale = torch.clamp(current_scale, min=1e-4)
-
-        if not self.weight_scale_initialized:
-            self.weight_running_scale.copy_(current_scale)
-            self.weight_peak_scale.copy_(current_scale)
-            self.weight_scale_initialized.fill_(True)
-        elif self.training:
-            ema = self.weight_scale_ema
-            self.weight_running_scale.mul_(ema).add_(current_scale * (1 - ema))
-            self.weight_peak_scale.copy_(torch.maximum(self.weight_peak_scale, current_scale))
-
-    def _quantize_weight(self) -> torch.Tensor:
-        """
-        Returns the weight tensor to use in conv (quantized or not),
-        preserving your exact logic and STE behavior.
-        """
-        if not self.quantize_weights:
-            return self.conv.weight
-
-        # Binary case
-        if self.weight_bit_width == 1:
-            return BinaryWeight.apply(self.conv.weight)
-
-        # Multi-bit case
-        if self.weight_bit_width > 1:
-            self._update_weight_scales()
-
-            effective_scale = torch.maximum(
-                self.weight_running_scale,
-                self.weight_peak_scale * 0.5
+        if self.quantize_activations:
+            self.act_quant = QuantAct(
+                config=config,
+                layer_name=self.layer_name,  
             )
-
-            # Use QuantizedWeight autograd op for STE-safe quantization.
-            return QuantizedWeight.apply(self.conv.weight, self.weight_bit_width, effective_scale)
-
-        return self.conv.weight
+    
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass with quantized weights and activations
         """
 
-        weight = self._quantize_weight()
+        if self.quantize_weights:
+            weight = self.weight_quant(self.conv.weight)
+        else:
+            weight = self.conv.weight
         
-        # Log quantized/processed weight statistics to TensorBoard (regardless of quantization mode)
-        if self.enable_logging  and self.logger is not None and self.forward_count % 100 == 0:
+        out = F.conv2d(
+            input=x, 
+            weight=weight, 
+            bias=self.conv.bias,
+            stride=self.conv.stride,
+            padding=self.conv.padding,
+        )
+        
+        if self.quantize_activations:   
+            out_act = self.act_quant(out)
+        else:
+            out_act = out
+        
+        self.forward_count += 1
+
+        if self.enable_logging_params and self.logger is not None and self.forward_count % 100 == 0:
             with torch.no_grad():
                 self.logger.log_scalars(f'params/{self.layer_name}/layer/input', {
                     'min': x.min().item(),
@@ -297,16 +90,92 @@ class QuantizedConv2d(nn.Module):
                     'std': weight.std().item()
                 }, self.forward_count)
                 self.logger.log_histogram(f'params/{self.layer_name}/weights_hist', weight, self.forward_count)
+
+                self.logger.log_scalars(f'params/{self.layer_name}/weights', {
+                    'min': out_act.min().item(),
+                    'max': out_act.max().item(),
+                    'mean': out_act.mean().item(),
+                    'std': out_act.std().item()
+                }, self.forward_count)
         
-        # Perform convolution with quantized weights
-        out = F.conv2d(
-            x, weight, self.conv.bias,
-            stride=self.conv.stride,
-            padding=self.conv.padding,
-        )
+        return out_act
+
+
+class QuantizedIF(nn.Module):
+    def __init__(
+        self,
+        config: Optional[dict] = None,
+        layer_name: str = "if",
+    ):
+        super().__init__()
+        self.threshold = config.get('threshold', 1.0)
+        self.alpha = config.get('alpha', 10.0)
+        self.quantize_mem = config.get('quantize_mem', False)
+        self.mem_bit_width = config.get('mem_bit_width', 16)
+
+        self.mem = None
+
+    def forward(self, x, mem) -> Any:
+        if mem is None:
+            mem = torch.zeros_like(x)
+
+        mem = mem + x
+
+        spk = SurrogateSpike.apply(mem - self.threshold, self.alpha)
+        mem = mem * (1.0 - spk)
+    
+        # Quantize membrane again after reset if enabled
+        if self.quantize_mem:
+            mem = QuantMembrane(mem, bit_width=self.mem_bit_width, mem_range=self.threshold * 2.0)
+    
+        return spk, mem
+
+class QuantizedLIF(nn.Module):
+    def __init__(
+        self,
+        config: Optional[dict] = None,
+        layer_name: str = "lif",
+    ):
+        super().__init__()
         
-        # Quantize activations (or pass through identity if disabled)
-        out = self.act_quant(out)
-        
-        self.forward_count += 1
-        return out
+        self.threshold = config.get('threshold', 1.0)
+        self.decay = config.get('decay', 0.5)
+        self.alpha = config.get('alpha', 10.0)
+        self.quantize_mem = config.get('quantize_mem', False)
+        self.mem_bit_width = config.get('mem_bit_width', 16)
+
+        self.mem = None
+
+    def forward(self, x, mem) -> Any:
+        if mem is None:
+            mem = torch.zeros_like(x)
+
+        decay_factor = torch.tensor(self.decay, device=x.device, dtype=x.dtype)
+        mem = mem * decay_factor + x
+
+        spk = SurrogateSpike.apply(mem - self.threshold, self.alpha)
+        mem = mem * (1.0 - spk)
+    
+        # Quantize membrane again after reset if enabled
+        if self.quantize_mem:
+            mem = QuantMembrane(mem, bit_width=self.mem_bit_width, mem_range=self.threshold * 2.0)
+    
+        return spk, mem
+
+class SurrogateSpike(torch.autograd.Function):
+    """
+    Hard threshold in forward; smooth surrogate gradient in backward.
+    """
+    @staticmethod
+    def forward(ctx, x, alpha: float):
+        ctx.save_for_backward(x)
+        ctx.alpha = alpha
+        return (x > 0).to(x.dtype)
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        (x,) = ctx.saved_tensors
+        alpha = ctx.alpha
+        s = torch.sigmoid(alpha * x)
+        grad = alpha * s * (1 - s)
+        return grad_out * grad, None

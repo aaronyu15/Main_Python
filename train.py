@@ -1,7 +1,3 @@
-"""
-Main training script for SNN Optical Flow
-"""
-
 import argparse
 import yaml
 import torch
@@ -11,6 +7,9 @@ from torch.utils.data import DataLoader
 from snn.models import EventSNNFlowNetLite
 from snn.dataset import OpticalFlowDataset
 from snn.training import SNNTrainer
+from snn.utils.logger import Logger
+
+from utils import *
 
 
 def parse_args():
@@ -30,92 +29,30 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_config(config_path: str) -> dict:
-    """Load configuration from YAML file"""
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    return config
-
-
-def build_model(config: dict, logger=None) -> torch.nn.Module:
-    """Build model from configuration"""
-    model_type = config.get('model_type', 'SpikingFlowNet')
-    
-    # Enable parameter logging (for both quantized and non-quantized models)
-    log_params = config.get('log_params', False)
-    
-    if model_type == 'EventSNNFlowNetLite':
-        model = EventSNNFlowNetLite(
-            base_ch=config.get('base_ch', 32),
-            decay=config.get('decay', 0.5),
-            threshold=config.get('threshold', 1.0),
-            alpha=config.get('alpha', 10.0),
-            quantize_weights=config.get('quantize_weights', False),
-            quantize_activations=config.get('quantize_activations', False),
-            quantize_mem=config.get('quantize_mem', False),
-            weight_bit_width=config.get('weight_bit_width', 8),
-            act_bit_width=config.get('act_bit_width', 8),
-            output_bit_width=config.get('output_bit_width', 16),
-            first_layer_bit_width=config.get('first_layer_bit_width', 8),
-            mem_bit_width=config.get('mem_bit_width', 16),
-            enable_logging=log_params,
-            logger=logger
-        )
-    
-    return model
-
-
 def build_dataloaders(config: dict, data_root: str = None):
-    """Build train and validation dataloaders"""
-    
-    # Use data_root from config if not provided as argument
     if data_root is None:
         data_root = config.get('data_root', '../blink_sim/output')
     
-    
-    # Get number of event bins (use num_bins if specified, otherwise fall back to in_channels)
-    num_event_bins = config.get('num_bins', config.get('in_channels', 5))
-    
-    # Datasets
     train_dataset = OpticalFlowDataset(
         data_root=data_root,
-        split='train',
-        transform=None,  # Let dataset handle cropping for consistency
         use_events=config.get('use_events', True),
-        num_bins=num_event_bins,
+        num_bins=config.get('num_bins', 5),
         data_size=config.get('data_size', (320, 320)),
-        crop_size=config.get('crop_size', (320, 320)),
         max_samples=config.get('max_train_samples', None)
     )
     
-    #val_dataset = OpticalFlowDataset(
-    #    data_root=data_root,
-    #    split='val',
-    #    transform=None,  # Let dataset handle cropping for consistency
-    #    use_events=config.get('use_events', True),
-    #    num_bins=num_event_bins,
-    #    crop_size=config.get('crop_size', (320, 320)),
-    #    max_samples=config.get('max_val_samples', None)
-    #)
-    val_dataset = []
+    train_size = int(0.9 * len(train_dataset))
+    val_size = len(train_dataset) - train_size
+    train_dataset, val_dataset = torch.utils.data.random_split(
+        train_dataset, [train_size, val_size]
+    )
     
-    # If no validation set, use a portion of training
-    if len(val_dataset) == 0:
-        print("No validation set found, splitting training set...")
-        train_size = int(0.9 * len(train_dataset))
-        val_size = len(train_dataset) - train_size
-        train_dataset, val_dataset = torch.utils.data.random_split(
-            train_dataset, [train_size, val_size]
-        )
-    
-    # Dataloaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.get('batch_size', 4),
         shuffle=True,
         num_workers=config.get('num_workers', 4),
         pin_memory=True,
-        drop_last=True
     )
     
     val_loader = DataLoader(
@@ -130,47 +67,37 @@ def build_dataloaders(config: dict, data_root: str = None):
 
 
 def main():
-    # Parse arguments
     args = parse_args()
     
-    # Load configuration
     config = load_config(args.config)
     print(f"Loaded configuration from {args.config}")
     
-    # Set device
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
     
-    # Create logger first (needed for quantization logging)
-    from snn.utils.logger import Logger
-    logger = Logger(log_dir=args.log_dir)
     
-    # Build model with logger for quantization statistics
-    model = build_model(config, logger=logger)
+    model = build_model(config, device=device, train=True)
     print(f"Built model: {config.get('model_type', 'SpikingFlowNet')}")
     
-    # Log quantization status
+    logger = Logger(log_dir=args.log_dir)
+    model.set_logger(logger)
+    
     if config.get('quantize_weights', False) or config.get('quantize_activations', False) or config.get('quantize_mem', False):
         print(f"Quantization enabled: W{config.get('weight_bit_width', 8)}A{config.get('act_bit_width', 8)}M{config.get('mem_bit_width', 16)}")
         print(f"  Weight quantization: {config.get('quantize_weights', False)}")
         print(f"  Activation quantization: {config.get('quantize_activations', False)}")
         print(f"  Membrane quantization: {config.get('quantize_mem', False)}")
-    if config.get('log_params', False):
-        print(f"✓ Model parameters and statistics will be logged to TensorBoard")
-    
-    # Count parameters
+
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Number of parameters: {num_params:,}")
     
-    # Build dataloaders
-    # Command line arg overrides config value
     data_root = config.get('data_root', args.data_root)
     train_loader, val_loader = build_dataloaders(config, data_root)
+
     print(f"Data root: {data_root}")
     print(f"Train samples: {len(train_loader.dataset)}")
     print(f"Val samples: {len(val_loader.dataset)}")
     
-    # Create trainer (using the logger we already created)
     trainer = SNNTrainer(
         model=model,
         train_loader=train_loader,
@@ -179,14 +106,14 @@ def main():
         device=device,
         checkpoint_dir=args.checkpoint_dir,
         log_dir=args.log_dir,
-        logger=logger  # Pass existing logger
+        logger=logger 
     )
     
     # Log configuration
-    trainer.logger.log_config(config)
+    logger.log_config(config)
     
     # Train
-    num_epochs = config.get('num_epochs', 200)
+    num_epochs = config.get('num_epochs', 100)
     trainer.train(num_epochs=num_epochs, resume=args.resume)
 
 

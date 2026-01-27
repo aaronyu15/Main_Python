@@ -1,7 +1,3 @@
-"""
-Logging utilities for training
-"""
-
 import torch
 from torch.utils.tensorboard import SummaryWriter
 from pathlib import Path

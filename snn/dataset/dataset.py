@@ -31,30 +31,21 @@ class OpticalFlowDataset(Dataset):
     def __init__(
         self,
         data_root: str,
-        split: str = 'train',
-        transform=None,
         use_events: bool = True,
         num_bins: int = 5,
         data_size: Tuple[int, int] = (320, 320),
-        crop_size: Tuple[int, int] = (320, 320),
         max_samples: Optional[int] = None
     ):
         """
         Args:
             data_root: Root directory containing the data (e.g., blink_sim/output)
-            split: 'train' or 'val'
-            transform: Optional transform to apply
             use_events: Use event data (vs RGB images)
             num_bins: Number of temporal bins for event representation
-            crop_size: Size to crop images/events to
             max_samples: Maximum number of samples to load (for debugging)
         """
         self.data_root = Path(data_root)
-        self.split = split
-        self.transform = transform
         self.use_events = use_events
         self.num_bins = num_bins
-        self.crop_size = crop_size
         self.data_size = data_size
         
         # Find all sequences
@@ -250,10 +241,6 @@ class OpticalFlowDataset(Dataset):
         # If not created (shouldn't happen), create default
         if 'valid_mask' not in locals():
             valid_mask = torch.ones(1, flow.shape[1], flow.shape[2])
-        
-        # Apply transforms (cropping, augmentation, etc.)
-        if self.transform is not None:
-            input_tensor, flow, valid_mask = self.transform(input_tensor, flow, valid_mask)
         
         return {
             'input': input_tensor,

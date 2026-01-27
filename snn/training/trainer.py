@@ -1,8 +1,3 @@
-"""
-SNN Trainer Class
-Main training loop with quantization awareness and checkpointing
-"""
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -15,21 +10,11 @@ from tqdm import tqdm
 
 from .losses import CombinedLoss, endpoint_error
 from ..utils.logger import Logger
-from ..utils.metrics import (compute_metrics, calculate_outliers, 
+from ..utils.metrics import (calculate_outliers, 
                              calculate_effective_epe, calculate_multi_percentile_epe)
 
 
 class SNNTrainer:
-    """
-    Trainer for Spiking Neural Networks on Optical Flow
-    
-    Features:
-    - Quantization-aware training with switches
-    - Progressive quantization (full -> 8-bit -> 4-bit -> binary)
-    - Checkpointing and resume
-    - Tensorboard logging
-    - Learning rate scheduling
-    """
     def __init__(
         self,
         model: nn.Module,
@@ -39,30 +24,28 @@ class SNNTrainer:
         device: str = 'cuda',
         checkpoint_dir: str = './checkpoints',
         log_dir: str = './logs',
-        logger: Optional[Logger] = None  # Accept external logger
+        logger: Optional[Logger] = None 
     ):
         self.model = model.to(device)
-        self.train_loader = train_loader
-        self.val_loader = val_loader
         self.config = config
         self.device = device
+
+        self.train_loader = train_loader
+        self.val_loader = val_loader
         
-        # Directories
         self.checkpoint_dir = Path(checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         
-        # Logger (use provided logger or create new one)
-        self.logger = logger if logger is not None else Logger(log_dir)
+        self.logger = logger 
         
-        # Loss function
         self.criterion = CombinedLoss(
-            flow_weight=config.get('flow_weight', 1.0),
-            angular_weight=config.get('angular_weight', 0.0),
+            endpoint_weight=config.get('endpoint_weight', 1.0),
+            angular_weight=config.get('angular_weight', 0.5),
         )
         
-        # Optimizer
         lr = config.get('learning_rate', 1e-4)
         weight_decay = config.get('weight_decay', 1e-4)
         self.optimizer = optim.AdamW(
@@ -71,31 +54,25 @@ class SNNTrainer:
             weight_decay=weight_decay
         )
         
-        # Learning rate scheduler
         self.scheduler = optim.lr_scheduler.MultiStepLR(
             self.optimizer,
             milestones=config.get('lr_milestones', [100, 150, 200]),
             gamma=config.get('lr_gamma', 0.5)
         )
         
-        # Training state
         self.epoch = 0
         self.global_step = 0
         self.best_val_epe = float('inf')
         
-        # Quantization schedule
-        self.quantization_enabled = config.get('quantization_enabled', False)
         
     def train_epoch(self) -> Dict[str, float]:
-        """Train for one epoch"""
         self.model.train()
         
         epoch_losses = {
             'total_loss': 0.0,
-            'flow_loss': 0.0,
+            'endpoint_loss': 0.0,
             'angular_loss': 0.0,
         }
-        epoch_epe = 0.0
         epoch_outliers = 0.0
         epoch_flow_max = 0.0
         epoch_flow_min = 0.0
@@ -105,39 +82,26 @@ class SNNTrainer:
         pbar = tqdm(self.train_loader, desc=f"Epoch {self.epoch}")
         
         for batch_idx, batch in enumerate(pbar):
-            # Move to device
             inputs = batch['input'].to(self.device)
             gt_flow = batch['flow'].to(self.device)
             valid_mask = batch['valid_mask'].to(self.device)
             
-            # Forward pass
             self.optimizer.zero_grad()
             outputs = self.model(inputs)
             
-            # Compute losses
-            losses = self.criterion(outputs, gt_flow, valid_mask, self.model)
+            losses = self.criterion(outputs, gt_flow, valid_mask)
             
-            # Backward pass
             losses['total_loss'].backward()
-            
-            # Gradient clipping
-            if self.config.get('grad_clip', 0) > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
-                    self.config['grad_clip']
-                )
-            
+
             self.optimizer.step()
             
-            # Compute metrics
+            # Metrics
             with torch.no_grad():
-                epe = endpoint_error(outputs['flow'], gt_flow, valid_mask)
+
                 outliers = calculate_outliers(outputs['flow'], gt_flow, valid_mask, threshold=3.0)
                 
-                # Effective pixel metrics (flow magnitude > 0.1)
                 epe_effective = calculate_effective_epe(outputs['flow'], gt_flow, valid_mask, threshold=0.1)
                 
-                # Percentile-based metrics (top 50%, 25%, 10%, 5%)
                 percentile_metrics = calculate_multi_percentile_epe(
                     outputs['flow'], gt_flow, valid_mask, 
                     percentiles=[50, 75, 90, 95]
@@ -148,56 +112,45 @@ class SNNTrainer:
                 flow_min = flow_pred.min().item()
                 flow_avg = flow_pred.abs().mean().item()
             
-            # Accumulate losses
             for key in epoch_losses:
                 epoch_losses[key] += losses[key]
-            epoch_epe += epe.item()            
             epoch_outliers += outliers            
             epoch_flow_max += flow_max
             epoch_flow_min += flow_min
             epoch_flow_avg += flow_avg
             num_batches += 1
+
             
             # Update progress bar
             pbar.set_postfix({
                 'loss': losses['total_loss'].item(),
-                'epe': epe.item(),
+                'epe': losses['endpoint_loss'].item(),
                 'outliers': f'{outliers:.2f}%',
                 'lr': self.optimizer.param_groups[0]['lr']
             })
             
-            # Log to tensorboard
             if self.global_step % self.config.get('log_interval', 10) == 0:
                 for key, value in losses.items():
                     self.logger.log_scalar(f'train/{key}', value, self.global_step)
-                self.logger.log_scalar('train/epe', epe.item(), self.global_step)
+
+                self.logger.log_scalar('train/outliers', outliers, self.global_step)
                 self.logger.log_scalar('train/epe_effective', epe_effective, self.global_step)
                 
-                # Log percentile-based EPE
                 for key, value in percentile_metrics.items():
                     if 'epe' in key:
                         self.logger.log_scalar(f'train/{key}', value, self.global_step)
                 
-                self.logger.log_scalar('train/outliers', outliers, self.global_step)
                 self.logger.log_scalar('train/lr', self.optimizer.param_groups[0]['lr'], self.global_step)
                 
-                # Log flow prediction statistics
                 self.logger.log_scalar('train/flow_max', flow_max, self.global_step)
                 self.logger.log_scalar('train/flow_min', flow_min, self.global_step)
                 self.logger.log_scalar('train/flow_avg', flow_avg, self.global_step)
                 
-                # Log spike statistics
-                if 'spike_stats' in outputs:
-                    for key, value in outputs['spike_stats'].items():
-                        if isinstance(value, (int, float)):
-                            self.logger.log_scalar(f'train/spike_{key}', value, self.global_step)
             
             self.global_step += 1
         
-        # Average losses
         for key in epoch_losses:
             epoch_losses[key] /= num_batches
-        epoch_epe /= num_batches
         epoch_outliers /= num_batches
         epoch_flow_max /= num_batches
         epoch_flow_min /= num_batches
@@ -205,7 +158,6 @@ class SNNTrainer:
         
         return {
             **epoch_losses,
-            'epe': epoch_epe,
             'outliers': epoch_outliers,
             'flow_max': epoch_flow_max,
             'flow_min': epoch_flow_min,
@@ -219,9 +171,8 @@ class SNNTrainer:
         
         val_losses = {
             'total_loss': 0.0,
-            'flow_loss': 0.0
+            'endpoint_loss': 0.0
         }
-        val_epe = 0.0
         val_epe_effective = 0.0
         val_epe_top50pct = 0.0
         val_epe_top25pct = 0.0
@@ -246,7 +197,6 @@ class SNNTrainer:
             losses = self.criterion(outputs, gt_flow, valid_mask, self.model)
             
             # Compute metrics
-            epe = endpoint_error(outputs['flow'], gt_flow, valid_mask)
             outliers = calculate_outliers(outputs['flow'], gt_flow, valid_mask, threshold=3.0)
             
             # Effective pixel metrics
@@ -263,25 +213,26 @@ class SNNTrainer:
             flow_min = flow_pred.min().item()
             flow_avg = flow_pred.abs().mean().item()
             
-            # Accumulate
-            val_losses['total_loss'] += losses['total_loss'].item()
-            val_losses['flow_loss'] += losses['flow_loss'].item()
-            val_epe += epe.item()
+            val_losses['total_loss'] += losses['total_loss']
+            val_losses['endpoint_loss'] += losses['endpoint_loss']
+            val_losses['angular_loss'] += losses['angular_loss']
+            val_outliers += outliers
+
             val_epe_effective += epe_effective
             val_epe_top50pct += percentile_metrics['epe_top50pct']
             val_epe_top25pct += percentile_metrics['epe_top25pct']
             val_epe_top10pct += percentile_metrics['epe_top10pct']
             val_epe_top5pct += percentile_metrics['epe_top5pct']
-            val_outliers += outliers
+
             val_flow_max += flow_max
             val_flow_min += flow_min
             val_flow_avg += flow_avg
+
             num_batches += 1
         
         # Average
         for key in val_losses:
             val_losses[key] /= num_batches
-        val_epe /= num_batches
         val_epe_effective /= num_batches
         val_epe_top50pct /= num_batches
         val_epe_top25pct /= num_batches
@@ -294,7 +245,6 @@ class SNNTrainer:
         
         return {
             **val_losses,
-            'epe': val_epe,
             'epe_effective': val_epe_effective,
             'epe_top50pct': val_epe_top50pct,
             'epe_top25pct': val_epe_top25pct,
