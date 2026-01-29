@@ -4,11 +4,12 @@ import torch
 from pathlib import Path
 from torch.utils.data import DataLoader
 
-from snn.models import EventSNNFlowNetLite
-from snn.dataset import OpticalFlowDataset
-from snn.training import SNNTrainer
-from snn.utils.logger import Logger
+from snn.models import *
 
+models = {
+    'EventSNNFlowNetLite': EventSNNFlowNetLite,
+    'OtherModel': None,  
+}
 
 
 def load_config(config_path: str) -> dict:
@@ -21,10 +22,7 @@ def load_config(config_path: str) -> dict:
 def get_model(config: dict) -> torch.nn.Module:
     model_type = config.get('model_type', 'EventSNNFlowNetLite')
 
-    if model_type == 'EventSNNFlowNetLite':
-        model = EventSNNFlowNetLite(
-            config=config,
-        )
+    model = models[model_type](config=config)
 
     return model
 

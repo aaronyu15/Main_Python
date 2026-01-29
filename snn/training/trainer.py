@@ -171,7 +171,8 @@ class SNNTrainer:
         
         val_losses = {
             'total_loss': 0.0,
-            'endpoint_loss': 0.0
+            'endpoint_loss': 0.0,
+            'angular_loss': 0.0
         }
         val_epe_effective = 0.0
         val_epe_top50pct = 0.0
@@ -194,7 +195,7 @@ class SNNTrainer:
             outputs = self.model(inputs)
             
             # Compute losses
-            losses = self.criterion(outputs, gt_flow, valid_mask, self.model)
+            losses = self.criterion(outputs, gt_flow, valid_mask)
             
             # Compute metrics
             outliers = calculate_outliers(outputs['flow'], gt_flow, valid_mask, threshold=3.0)
@@ -322,9 +323,9 @@ class SNNTrainer:
             
             # Log epoch metrics
             print(f"\nEpoch {epoch} Summary:")
-            print(f"  Train - Loss: {train_metrics['total_loss']:.4f}, EPE: {train_metrics['epe']:.4f}, Outliers: {train_metrics['outliers']:.2f}%")
-            print(f"  Val   - Loss: {val_metrics['total_loss']:.4f}, EPE: {val_metrics['epe']:.4f}, Outliers: {val_metrics['outliers']:.2f}%")
-            print(f"  Val EPE (Effective) - All: {val_metrics['epe']:.4f}, Flow>0.1: {val_metrics['epe_effective']:.4f}")
+            print(f"  Train - Loss: {train_metrics['total_loss']:.4f}, EPE: {train_metrics['endpoint_loss']:.4f}, Ang: {train_metrics['angular_loss']:.4f}, Outliers: {train_metrics['outliers']:.2f}%")
+            print(f"  Val   - Loss: {val_metrics['total_loss']:.4f}, EPE: {val_metrics['endpoint_loss']:.4f}, Ang: {val_metrics['angular_loss']:.4f}, Outliers: {val_metrics['outliers']:.2f}%")
+            print(f"  Val EPE (Effective) - All: {val_metrics['endpoint_loss']:.4f}, Flow>0.1: {val_metrics['epe_effective']:.4f}")
             print(f"  Val EPE (Percentiles) - Top50%: {val_metrics['epe_top50pct']:.4f}, Top25%: {val_metrics['epe_top25pct']:.4f}, Top10%: {val_metrics['epe_top10pct']:.4f}, Top5%: {val_metrics['epe_top5pct']:.4f}")
             
             for key, value in train_metrics.items():
@@ -337,8 +338,8 @@ class SNNTrainer:
                 self.save_checkpoint(f'checkpoint_epoch_{epoch}.pth')
             
             # Save best model
-            if val_metrics['epe'] < self.best_val_epe:
-                self.best_val_epe = val_metrics['epe']
+            if val_metrics['endpoint_loss'] < self.best_val_epe:
+                self.best_val_epe = val_metrics['endpoint_loss']
                 self.save_checkpoint(is_best=True)
                 print(f"  New best validation EPE: {self.best_val_epe:.4f}")
         

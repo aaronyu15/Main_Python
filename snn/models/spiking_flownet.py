@@ -1,18 +1,23 @@
 import torch
 import torch.nn as nn
 from typing import Dict, List, Optional, Tuple
-from .snn_layers import SpikingConvBlock, ConvBlock
+from .snn_layers import *
 import torch.nn.functional as F
 
+
+layers = {
+    "SpikingConvBlock": SpikingConvBlock,
+    "ConvBlock": ConvBlock,
+    "SpikingDepthBlock": SpikingDepthBlock,
+    "SpikingFactorBlock": SpikingFactorBlock,
+    "SpikingSumBlock": SpikingSumBlock,
+    "SpikingLinearBlock": SpikingLinearBlock,
+}
 
 class EventSNNFlowNetLite(nn.Module):
     def __init__(
         self,
         config,
-        base_ch=32,
-        decay=0.5,
-        threshold=1.0,
-        alpha=10.0,
     ):
         super().__init__()
 
@@ -24,14 +29,17 @@ class EventSNNFlowNetLite(nn.Module):
 
         self.output_bit_width = config.get("output_bit_width", 8)
         self.input_bit_width = config.get("input_bit_width", 8)
+        self.base_ch = config.get("base_ch", 32)
 
         self.logger = None  # TensorBoard logger
+        
+        conv_layer = layers[config.get("conv_type", "SpikingConvBlock")]
 
         # O = (F - K + 2P)/S + 1
         # Input shape: 320x320
         self.e1 = SpikingConvBlock(
             2,
-            base_ch,
+            self.base_ch,
             k=3,
             s=2,
             p=1,
@@ -41,9 +49,9 @@ class EventSNNFlowNetLite(nn.Module):
             layer_name="e1",
         ) # -> 160x160
 
-        self.e2 = SpikingConvBlock(
-            base_ch, 
-            base_ch * 2, 
+        self.e2 = conv_layer(
+            self.base_ch, 
+            self.base_ch * 2, 
             k=3, 
             s=2, 
             p=1, 
@@ -51,9 +59,9 @@ class EventSNNFlowNetLite(nn.Module):
             layer_name="e2"
         ) # -> 80x80
 
-        self.e3 = SpikingConvBlock(
-            base_ch * 2, 
-            base_ch * 4, 
+        self.e3 = conv_layer(
+            self.base_ch * 2, 
+            self.base_ch * 4, 
             k=3, 
             s=2, 
             p=1, 
@@ -61,9 +69,9 @@ class EventSNNFlowNetLite(nn.Module):
             layer_name="e3"
         ) # -> 40x40
 
-        self.d3 = SpikingConvBlock(
-            base_ch * 4,
-            base_ch * 2,
+        self.d3 = conv_layer(
+            self.base_ch * 4,
+            self.base_ch * 2,
             k=3,
             s=1,
             p=1,
@@ -71,9 +79,9 @@ class EventSNNFlowNetLite(nn.Module):
             layer_name="d3",
         ) # -> 80x80
 
-        self.d2 = SpikingConvBlock(
-            base_ch * 2,
-            base_ch,
+        self.d2 = conv_layer(
+            self.base_ch * 2,
+            self.base_ch,
             k=3,
             s=1,
             p=1,
@@ -81,9 +89,9 @@ class EventSNNFlowNetLite(nn.Module):
             layer_name="d2",
         ) # -> 160x160
 
-        self.d1 = SpikingConvBlock(
-            base_ch,
-            base_ch,
+        self.d1 = conv_layer(
+            self.base_ch,
+            self.base_ch,
             k=3,
             s=1,
             p=1,
@@ -92,7 +100,7 @@ class EventSNNFlowNetLite(nn.Module):
         ) # -> 320x320
 
         self.flow_head = ConvBlock(
-            base_ch,
+            self.base_ch,
             2,
             k=3,
             s=1,
@@ -147,3 +155,4 @@ class EventSNNFlowNetLite(nn.Module):
             else:
                 flow_acc = flow_acc + dflow
         return {"flow": flow_acc}
+
