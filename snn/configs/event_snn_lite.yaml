@@ -9,17 +9,20 @@ num_bins: 5                         # Event temporal bins - controls temporal hi
                                     # 8 bins = 1.6x frame period (60% more temporal history)
                                     # 10 bins = 2x frame period (double temporal history)
 num_timesteps: 5                    # Not used by EventSNNFlowNetLite (uses num_bins instead)
-base_ch: 32                         # Base number of channels in encoder
+base_ch: 16                         # Base number of channels in encoder
 
 enable_logging_params: false                    # Log model parameters and statistics to TensorBoard
 
 
 # Model layer settings
 conv_type: 'SpikingConvBlock'
-lif_type: 'QuantizedLIF'
+lif_type: 'QuantizedIF'
 decay: 0.5                          # LIF neuron decay factor (0-1, smaller = faster decay)
 threshold: 1.0                      # LIF neuron firing threshold
+reset: 0.0
 alpha: 10.0                         # Surrogate gradient slope (higher = sharper)
+use_norm: false
+use_bias: false                      # Enable bias in convolutional layers
 
 # Quantization Settings (now supported by EventSNNFlowNetLite)
 # Note: Start with quantization OFF for baseline, or use 8-bit as starting point
@@ -34,17 +37,19 @@ mem_bit_width: 8
 num_epochs: 100                   # Faster training for prototyping
 batch_size: 4                       # Larger batch for small model
 val_batch_size: 4
-num_workers: 8                      # Use 0 to avoid multiprocessing with h5py
+num_workers: 4                      # Use 0 to avoid multiprocessing with h5py
 
 # Optimizer Settings
-learning_rate: 0.02               # Higher LR for faster convergence
+learning_rate: 0.002               # Higher LR for faster convergence
 weight_decay: 0.01
 lr_milestones: [50, 75, 100]
 lr_gamma: 0.5
 
 # Loss Weights
 endpoint_weight: 1.0
-angular_weight: 0.5              # Angular error loss weight (set >0 to enable)
+angular_weight: 1.0              
+outlier_weight: 1.0            
+effective_epe_weights: [0.0, 0.0, 0.0, 0.0, 0.0]  # Weights for effective EPE at different thresholds
 smooth_weight: 0.1
 
 # Data Settings

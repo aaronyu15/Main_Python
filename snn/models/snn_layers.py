@@ -8,6 +8,8 @@ layer_params = {
     "QuantizedLIF": QuantizedLIF,
     "QuantizedIF": QuantizedIF,
 }
+
+
 class SpikingConvBlock(nn.Module):
     def __init__(
         self,
@@ -49,8 +51,6 @@ class SpikingConvBlock(nn.Module):
 
         return spk, mem
 
-
-
 class ConvBlock(nn.Module):
     def __init__(
         self,
@@ -59,6 +59,8 @@ class ConvBlock(nn.Module):
         k=3,
         s=1,
         p=1,
+        use_norm=None,
+        use_bias=None,
         config=None,
         weight_bit_width=None,
         act_bit_width=None,
@@ -73,6 +75,8 @@ class ConvBlock(nn.Module):
             k=k, 
             s=s, 
             p=p, 
+            use_norm=use_norm,
+            use_bias=use_bias,
             config=config,
             weight_bit_width=weight_bit_width,
             act_bit_width=act_bit_width,
@@ -125,6 +129,42 @@ class SpikingDepthBlock(nn.Module):
         spk, mem = self.lif(x, mem)
 
         return spk, mem
+
+class DepthBlock(nn.Module):
+    def __init__(
+        self,
+        in_ch,
+        out_ch,
+        k=3,
+        s=1,
+        p=1,
+        use_norm=None,
+        use_bias=None,
+        config=None,
+        weight_bit_width=None,
+        act_bit_width=None,
+        layer_name=None,
+    ):
+        super().__init__()
+
+        self.logger = None
+        self.layer_name = layer_name
+        
+        self.conv = QuantizedDepthBlock(
+            in_ch, out_ch, 
+            k=k, 
+            s=s, 
+            p=p, 
+            config=config,
+            weight_bit_width=weight_bit_width,
+            act_bit_width=act_bit_width,
+            layer_name=layer_name,
+        )
+
+    def forward(self, x):
+        x = self.conv(x)
+
+        return x
 
 class SpikingFactorBlock(nn.Module):
     def __init__(

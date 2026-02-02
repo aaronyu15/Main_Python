@@ -349,7 +349,7 @@ def main():
     parser.add_argument(
         '--data-root',
         type=str,
-        default='../../blink_sim/output/test_set',
+        default='../../blink_sim/output/train_set',
         help='Override data root path'
     )
     parser.add_argument(

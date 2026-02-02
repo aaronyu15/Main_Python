@@ -46,7 +46,7 @@ def build_model(config: dict, device='cuda', train=True, checkpoint_path=None) -
         model = get_model(config)
     
         # Load weights
-        model.load_state_dict(checkpoint['model_state_dict'])
+        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         model = model.to(device)
         model.eval()
     

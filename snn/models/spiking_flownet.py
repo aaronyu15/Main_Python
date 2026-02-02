@@ -9,6 +9,7 @@ layers = {
     "SpikingConvBlock": SpikingConvBlock,
     "ConvBlock": ConvBlock,
     "SpikingDepthBlock": SpikingDepthBlock,
+    "DepthBlock": DepthBlock,
     "SpikingFactorBlock": SpikingFactorBlock,
     "SpikingSumBlock": SpikingSumBlock,
     "SpikingLinearBlock": SpikingLinearBlock,
@@ -99,12 +100,14 @@ class EventSNNFlowNetLite(nn.Module):
             layer_name="d1",
         ) # -> 320x320
 
-        self.flow_head = ConvBlock(
+        self.flow_head = DepthBlock(
             self.base_ch,
             2,
             k=3,
             s=1,
             p=1,
+            use_norm=False,
+            use_bias=False,
             config=config,
             weight_bit_width=self.output_bit_width,
             act_bit_width=self.output_bit_width,

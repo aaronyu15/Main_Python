@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import numpy as np
 from torch.utils.data import DataLoader
 from pathlib import Path
 from typing import Dict, Optional
@@ -8,11 +9,8 @@ import time
 import json
 from tqdm import tqdm
 
-from .losses import CombinedLoss, endpoint_error
 from ..utils.logger import Logger
-from ..utils.metrics import (calculate_outliers, 
-                             calculate_effective_epe, calculate_multi_percentile_epe)
-
+from .losses import CombinedLoss, endpoint_error, calculate_effective_epe, calculate_outliers, calculate_multi_percentile_epe
 
 class SNNTrainer:
     def __init__(
@@ -44,6 +42,8 @@ class SNNTrainer:
         self.criterion = CombinedLoss(
             endpoint_weight=config.get('endpoint_weight', 1.0),
             angular_weight=config.get('angular_weight', 0.5),
+            outlier_weight=config.get('outlier_weight', 1.0),
+            effective_epe_weights=config.get('effective_epe_weights', [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         )
         
         lr = config.get('learning_rate', 1e-4)
@@ -75,7 +75,6 @@ class SNNTrainer:
         }
         epoch_outliers = 0.0
         epoch_flow_max = 0.0
-        epoch_flow_min = 0.0
         epoch_flow_avg = 0.0
         num_batches = 0
         
@@ -98,7 +97,7 @@ class SNNTrainer:
             # Metrics
             with torch.no_grad():
 
-                outliers = calculate_outliers(outputs['flow'], gt_flow, valid_mask, threshold=3.0)
+                outliers = calculate_outliers(outputs['flow'], gt_flow, valid_mask, threshold=1.0)
                 
                 epe_effective = calculate_effective_epe(outputs['flow'], gt_flow, valid_mask, threshold=0.1)
                 
@@ -108,15 +107,14 @@ class SNNTrainer:
                 )
                 
                 flow_pred = outputs['flow']
-                flow_max = flow_pred.max().item()
-                flow_min = flow_pred.min().item()
-                flow_avg = flow_pred.abs().mean().item()
+                flow_mag = torch.norm(flow_pred, dim=1)
+                flow_max = flow_mag.max().item()
+                flow_avg = flow_mag.abs().mean().item()
             
             for key in epoch_losses:
                 epoch_losses[key] += losses[key]
             epoch_outliers += outliers            
             epoch_flow_max += flow_max
-            epoch_flow_min += flow_min
             epoch_flow_avg += flow_avg
             num_batches += 1
 
@@ -143,7 +141,6 @@ class SNNTrainer:
                 self.logger.log_scalar('train/lr', self.optimizer.param_groups[0]['lr'], self.global_step)
                 
                 self.logger.log_scalar('train/flow_max', flow_max, self.global_step)
-                self.logger.log_scalar('train/flow_min', flow_min, self.global_step)
                 self.logger.log_scalar('train/flow_avg', flow_avg, self.global_step)
                 
             
@@ -153,14 +150,12 @@ class SNNTrainer:
             epoch_losses[key] /= num_batches
         epoch_outliers /= num_batches
         epoch_flow_max /= num_batches
-        epoch_flow_min /= num_batches
         epoch_flow_avg /= num_batches
         
         return {
             **epoch_losses,
             'outliers': epoch_outliers,
             'flow_max': epoch_flow_max,
-            'flow_min': epoch_flow_min,
             'flow_avg': epoch_flow_avg
         }
     
@@ -181,7 +176,6 @@ class SNNTrainer:
         val_epe_top5pct = 0.0
         val_outliers = 0.0
         val_flow_max = 0.0
-        val_flow_min = 0.0
         val_flow_avg = 0.0
         num_batches = 0
         
@@ -198,7 +192,7 @@ class SNNTrainer:
             losses = self.criterion(outputs, gt_flow, valid_mask)
             
             # Compute metrics
-            outliers = calculate_outliers(outputs['flow'], gt_flow, valid_mask, threshold=3.0)
+            outliers = calculate_outliers(outputs['flow'], gt_flow, valid_mask, threshold=1.0)
             
             # Effective pixel metrics
             epe_effective = calculate_effective_epe(outputs['flow'], gt_flow, valid_mask, threshold=0.1)
@@ -210,9 +204,9 @@ class SNNTrainer:
             )
             
             flow_pred = outputs['flow']
-            flow_max = flow_pred.max().item()
-            flow_min = flow_pred.min().item()
-            flow_avg = flow_pred.abs().mean().item()
+            flow_mag = torch.norm(flow_pred, dim=1)
+            flow_max = flow_mag.max().item()
+            flow_avg = flow_mag.abs().mean().item()
             
             val_losses['total_loss'] += losses['total_loss']
             val_losses['endpoint_loss'] += losses['endpoint_loss']
@@ -226,7 +220,6 @@ class SNNTrainer:
             val_epe_top5pct += percentile_metrics['epe_top5pct']
 
             val_flow_max += flow_max
-            val_flow_min += flow_min
             val_flow_avg += flow_avg
 
             num_batches += 1
@@ -241,7 +234,6 @@ class SNNTrainer:
         val_epe_top5pct /= num_batches
         val_outliers /= num_batches
         val_flow_max /= num_batches
-        val_flow_min /= num_batches
         val_flow_avg /= num_batches
         
         return {
@@ -253,7 +245,6 @@ class SNNTrainer:
             'epe_top5pct': val_epe_top5pct,
             'outliers': val_outliers,
             'flow_max': val_flow_max,
-            'flow_min': val_flow_min,
             'flow_avg': val_flow_avg
         }
     
@@ -283,7 +274,7 @@ class SNNTrainer:
         """Load checkpoint"""
         checkpoint = torch.load(filepath, map_location=self.device)
         
-        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         self.epoch = checkpoint['epoch']
@@ -323,7 +314,7 @@ class SNNTrainer:
             
             # Log epoch metrics
             print(f"\nEpoch {epoch} Summary:")
-            print(f"  Train - Loss: {train_metrics['total_loss']:.4f}, EPE: {train_metrics['endpoint_loss']:.4f}, Ang: {train_metrics['angular_loss']:.4f}, Outliers: {train_metrics['outliers']:.2f}%")
+            print(f"  Train - Loss: {train_metrics['total_loss']:.4f}, EPE: {train_metrics['endpoint_loss']:.4f}, Ang: {train_metrics['angular_loss']:.4f}, Outliers: {train_metrics['outliers']:.2f}%%")
             print(f"  Val   - Loss: {val_metrics['total_loss']:.4f}, EPE: {val_metrics['endpoint_loss']:.4f}, Ang: {val_metrics['angular_loss']:.4f}, Outliers: {val_metrics['outliers']:.2f}%")
             print(f"  Val EPE (Effective) - All: {val_metrics['endpoint_loss']:.4f}, Flow>0.1: {val_metrics['epe_effective']:.4f}")
             print(f"  Val EPE (Percentiles) - Top50%: {val_metrics['epe_top50pct']:.4f}, Top25%: {val_metrics['epe_top25pct']:.4f}, Top10%: {val_metrics['epe_top10pct']:.4f}, Top5%: {val_metrics['epe_top5pct']:.4f}")

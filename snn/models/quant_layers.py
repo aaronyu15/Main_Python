@@ -115,7 +115,8 @@ class QuantizedConv2d(BaseLayer):
         k: int,
         s: int = 1,
         p: int = 0,
-        bias: bool = False,
+        use_norm = None,
+        use_bias = None,
         config: Optional[dict] = None,
         weight_bit_width: int = 8,
         act_bit_width: int = 8,
@@ -124,11 +125,16 @@ class QuantizedConv2d(BaseLayer):
         super().__init__(config=config, weight_bit_width=weight_bit_width, act_bit_width=act_bit_width, layer_name=layer_name)
 
         self.forward_count = 0
+        self.use_norm = config.get('use_norm', False) if use_norm is None else use_norm
+        self.use_bias = config.get('use_bias', False) if use_bias is None else use_bias
         
         self.conv = nn.Conv2d(
             in_channels, out_channels, k,
-            s, p, bias=bias
+            s, p, bias=self.use_bias
         )
+
+        if self.use_norm: 
+            self.norm = nn.InstanceNorm2d(out_channels, track_running_stats=True)
 
         if self.quantize_weights:
             self.weight_quant = QuantWeight()
@@ -154,6 +160,9 @@ class QuantizedConv2d(BaseLayer):
             stride=self.conv.stride,
             padding=self.conv.padding,
         )
+
+        if self.use_norm:
+            out = self.norm(out)
         
         if self.quantize_activations and self.act_bit_width < 32:   
             out_act = self.act_quant(out)
@@ -176,6 +185,7 @@ class QuantizedIF(nn.Module):
         super().__init__()
         self.threshold = config.get('threshold', 1.0)
         self.alpha = config.get('alpha', 10.0)
+        self.reset = config.get('reset', 0.0)
         self.quantize_mem = config.get('quantize_mem', False)
         self.mem_bit_width = config.get('mem_bit_width', 16)
 
@@ -188,7 +198,7 @@ class QuantizedIF(nn.Module):
         mem = mem + x
 
         spk = SurrogateSpike.apply(mem - self.threshold, self.alpha)
-        mem = mem * (1.0 - spk)
+        mem = mem * (self.threshold - spk) + self.reset * spk
     
         # Quantize membrane again after reset if enabled
         if self.quantize_mem:
@@ -207,6 +217,7 @@ class QuantizedLIF(nn.Module):
         self.threshold = config.get('threshold', 1.0)
         self.decay = config.get('decay', 0.5)
         self.alpha = config.get('alpha', 10.0)
+        self.reset = config.get('reset', 1.0)
         self.quantize_mem = config.get('quantize_mem', False)
         self.mem_bit_width = config.get('mem_bit_width', 16)
 
@@ -220,7 +231,7 @@ class QuantizedLIF(nn.Module):
         mem = mem * decay_factor + x
 
         spk = SurrogateSpike.apply(mem - self.threshold, self.alpha)
-        mem = mem * (1.0 - spk)
+        mem = mem * (self.threshold - spk) + self.reset * spk
     
         # Quantize membrane again after reset if enabled
         if self.quantize_mem:
