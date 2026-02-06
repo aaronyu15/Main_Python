@@ -180,7 +180,7 @@ class OpticalFlowDataset(Dataset):
                             # Get number of flow frames from sequence info
                             # Flow frames typically at ~30 fps, so compute interval
                             num_flow_frames = sample_info.get('num_frames', 30)
-                            frame_interval_us = total_duration_us / max(1, num_flow_frames - 1)
+                            frame_interval_us = total_duration_us / max(1, num_flow_frames)
 
                             # Base time per bin (using 5 bins as reference = 1 frame interval)
                             # Each bin represents frame_interval_us / 5 microseconds
