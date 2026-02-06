@@ -46,8 +46,8 @@ class Logger:
         with open(self.log_file, 'a') as f:
             f.write(f"{message}\n")
     
-    def log_config(self, config: Dict[str, Any]):
-        """Log configuration"""
+    def log_config(self, config: Dict[str, Any], model: torch.nn.Module = None):
+        """Log configuration and optionally model structure"""
         config_file = self.log_dir / 'config.json'
         with open(config_file, 'w') as f:
             json.dump(config, f, indent=2)
@@ -55,6 +55,14 @@ class Logger:
         # Also log as text to tensorboard
         config_str = json.dumps(config, indent=2)
         self.log_text('config', config_str)
+        
+        # Log model structure if provided
+        if model is not None:
+            model_str = str(model)
+            model_file = self.log_dir / 'model_structure.txt'
+            with open(model_file, 'w') as f:
+                f.write(model_str)
+            self.log_text('model_structure', f'```\n{model_str}\n```')
     
     def close(self):
         """Close logger"""

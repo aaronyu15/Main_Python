@@ -103,7 +103,6 @@ def angular_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
 
     ang = torch.acos(cos) * 180.0 / np.pi  # degrees
 
-
     if valid_mask is not None:
         if valid_mask.dim() == 4:
             valid_mask = valid_mask.squeeze(1)
@@ -210,6 +209,7 @@ class CombinedLoss(nn.Module):
         #    )
         #else:
         losses['endpoint_loss'] = endpoint_error(outputs['flow'], gt_flow, valid_mask)
+        losses['angular_loss'] = angular_error(outputs['flow'], gt_flow, valid_mask)
         losses['outlier_loss'] = calculate_outliers(outputs['flow'], gt_flow, valid_mask, threshold=1.0)
 
         losses['endpoint_0p1_loss'] = calculate_effective_epe(outputs['flow'], gt_flow, valid_mask, threshold=0.1, threshold_max=1.0)
@@ -218,7 +218,6 @@ class CombinedLoss(nn.Module):
         losses['endpoint_20p0_loss'] = calculate_effective_epe(outputs['flow'], gt_flow, valid_mask, threshold=20.0, threshold_max=50.0)
         losses['endpoint_50p0_loss'] = calculate_effective_epe(outputs['flow'], gt_flow, valid_mask, threshold=50.0, threshold_max=100.0)
         
-        losses['angular_loss'] = angular_error(outputs['flow'], gt_flow, valid_mask)
 
         losses['total_loss'] = (
             self.endpoint_weight * losses['endpoint_loss'] +

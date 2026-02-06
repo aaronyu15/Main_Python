@@ -51,18 +51,14 @@ def evaluate(args):
     
 
     # Load model
-    model, config = load_model(args.checkpoint, device, logger)
+    model, config = build_model(None, device, train=False, checkpoint_path=args.checkpoint)
     
     # Build dataset
-    dataset = OpticalFlowDataset(
-        data_root=args.data_root,
-        split=None,
-        transform=None,
-        use_events=config.get('use_events', True),
-        num_bins=config.get('in_channels', 5),
-        crop_size=config.get('crop_size', (320, 320)),
-        max_samples=args.num_samples
-    )
+    dataset_config = config.copy()
+    dataset_config['data_root'] = args.data_root
+    dataset_config['max_train_samples'] = args.num_samples
+    
+    dataset = OpticalFlowDataset(config=dataset_config)
     
     dataloader = DataLoader(
         dataset,

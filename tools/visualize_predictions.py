@@ -17,12 +17,12 @@ from snn.utils import flow_to_color, visualize_events
 
 def load_dataset(config: dict, data_root: Optional[str] = None) -> OpticalFlowDataset:
     
-    dataset = OpticalFlowDataset(
-        data_root=data_root,
-        use_events=config.get('use_events', True),
-        num_bins=config.get('num_bins', 5),
-        max_samples=None  # Load all samples
-    )
+    dataset_config = config.copy()
+    if data_root is not None:
+        dataset_config['data_root'] = data_root
+    dataset_config['max_train_samples'] = None  # Load all samples
+    
+    dataset = OpticalFlowDataset(config=dataset_config)
     
     return dataset
 
@@ -145,16 +145,16 @@ def visualize_flow_comparison(
     
     # Row 1: Input visualization
     # Show events by polarity (red=positive, blue=negative)
-    # Handle both old [num_bins, H, W] and new [num_bins, 2, H, W] formats
-    if input_events.ndim == 4:  # [num_bins, 2, H, W] - polarity-separated
-        # Sum across time bins: [num_bins, 2, H, W] -> [2, H, W]
+
+    # Sum across time bins: [num_bins, 2, H, W] -> [2, H, W]
+    if input_events.shape[1] == 2:
         event_sum = input_events.sum(axis=0)  # [2, H, W]
         pos_events = event_sum[0]  # Positive events
         neg_events = event_sum[1]  # Negative events
-    else:  # [num_bins, H, W] - old voxel grid format
-        event_sum = input_events.sum(axis=0)  # [H, W]
-        pos_events = np.maximum(event_sum, 0)
-        neg_events = np.maximum(-event_sum, 0)
+    else:  
+        event_sum = input_events.sum(axis=0)  # [2, H, W]
+        pos_events = event_sum[0]  # Positive events
+        neg_events = np.zeros_like(pos_events)  # No negative events
     
     h, w = pos_events.shape
     event_rgb = np.zeros((h, w, 3), dtype=np.float32)
@@ -349,7 +349,7 @@ def main():
     parser.add_argument(
         '--data-root',
         type=str,
-        default='../../blink_sim/output/train_set',
+        default='../../blink_sim/output/train',
         help='Override data root path'
     )
     parser.add_argument(

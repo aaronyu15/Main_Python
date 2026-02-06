@@ -98,14 +98,15 @@ def test_data_loading():
             print(f"⚠ Dataset not found at {data_root} - skipping data loading test")
             return False
         
-        dataset = OpticalFlowDataset(
-            data_root=str(data_root),
-            split='train',
-            use_events=True,
-            num_bins=5,
-            crop_size=(128, 128),
-            max_samples=1  # Just load one sample
-        )
+        config = {
+            'data_root': str(data_root),
+            'use_events': True,
+            'num_bins': 5,
+            'data_size': (128, 128),
+            'max_train_samples': 1  # Just load one sample
+        }
+        
+        dataset = OpticalFlowDataset(config=config)
         
         if len(dataset) > 0:
             sample = dataset[0]

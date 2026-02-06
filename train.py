@@ -33,13 +33,11 @@ def build_dataloaders(config: dict, data_root: str = None):
     if data_root is None:
         data_root = config.get('data_root', '../blink_sim/output')
     
-    train_dataset = OpticalFlowDataset(
-        data_root=data_root,
-        use_events=config.get('use_events', True),
-        num_bins=config.get('num_bins', 5),
-        data_size=config.get('data_size', (320, 320)),
-        max_samples=config.get('max_train_samples', None)
-    )
+    # Create config copy with data_root override if provided
+    dataset_config = config.copy()
+    dataset_config['data_root'] = data_root
+    
+    train_dataset = OpticalFlowDataset(config=dataset_config)
     
     train_size = int(0.9 * len(train_dataset))
     val_size = len(train_dataset) - train_size
@@ -110,7 +108,7 @@ def main():
     )
     
     # Log configuration
-    logger.log_config(config)
+    logger.log_config(config, model=model)
     
     # Train
     num_epochs = config.get('num_epochs', 100)

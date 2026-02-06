@@ -299,16 +299,14 @@ def visualize_events(event_voxel: np.ndarray, brightness_scale: float = 0.5) -> 
         event_voxel = event_voxel.detach().cpu().numpy()
     
     # Handle both voxel grid formats
-    if event_voxel.ndim == 4:  # [num_bins, 2, H, W] - polarity-separated
+    if event_voxel.shape[2] == 2:
         event_sum = event_voxel.sum(axis=0)  # [2, H, W]
         pos_events = event_sum[0]  # Positive events
         neg_events = event_sum[1]  # Negative events
-    elif event_voxel.ndim == 3:  # [num_bins, H, W] - old voxel grid format
-        event_sum = event_voxel.sum(axis=0)  # [H, W]
-        pos_events = np.maximum(event_sum, 0)
-        neg_events = np.maximum(-event_sum, 0)
     else:
-        raise ValueError(f"Expected event_voxel to have 3 or 4 dimensions, got {event_voxel.ndim}")
+        event_sum = event_voxel.sum(axis=0)  # [2, H, W]
+        pos_events = event_sum[0]  # Positive events
+        neg_events = np.zeros_like(pos_events)  # No negative events
     
     h, w = pos_events.shape
     event_rgb = np.zeros((h, w, 3), dtype=np.float32)

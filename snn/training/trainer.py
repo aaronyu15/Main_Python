@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 from torch.utils.data import DataLoader
+from torchvision.utils import make_grid
 from pathlib import Path
 from typing import Dict, Optional
 import time
@@ -10,6 +11,7 @@ import json
 from tqdm import tqdm
 
 from ..utils.logger import Logger
+from ..utils.visualization import visualize_flow
 from .losses import CombinedLoss, endpoint_error, calculate_effective_epe, calculate_outliers, calculate_multi_percentile_epe
 
 class SNNTrainer:
@@ -63,6 +65,61 @@ class SNNTrainer:
         self.epoch = 0
         self.global_step = 0
         self.best_val_epe = float('inf')
+    
+    def _visualize_batch(self, inputs: torch.Tensor, gt_flow: torch.Tensor, 
+                         valid_mask: torch.Tensor, pred_flow: Optional[torch.Tensor] = None,
+                         max_images: int = 4) -> Dict[str, torch.Tensor]:
+        """
+        Visualize batch data for TensorBoard logging
+        
+        Args:
+            inputs: Event tensor [B, num_bins, C, H, W] where C is pos/neg polarities
+            gt_flow: Ground truth flow [B, 2, H, W]
+            valid_mask: Valid mask [B, 1, H, W]
+            pred_flow: Predicted flow [B, 2, H, W] (optional)
+            max_images: Maximum number of images to visualize from batch
+            
+        Returns:
+            Dictionary of visualizations as tensors
+        """
+        batch_size = min(inputs.shape[0], max_images)
+        visualizations = {}
+        
+        # Visualize event input (sum across temporal bins and polarities)
+        # Input is [B, num_bins, C, H, W] where C=2 for pos/neg polarities
+        event_sum = inputs[:batch_size].sum(dim=(2))  # [B, T, H, W]
+        event_sum = event_sum.unsqueeze(2)  # [B, T, 1, H, W]
+
+        # Convert to RGB by repeating grayscale
+        event_vis = event_sum.repeat(1, 1, 3, 1, 1)  # [B, 3, H, W]
+        visualizations['events'] = event_vis.view(-1, 3, event_vis.shape[3], event_vis.shape[4])  
+        
+        # Visualize valid mask
+        valid_vis = valid_mask[:batch_size].repeat(1, 1, 3, 1, 1)  # [B, 3, H, W]
+        visualizations['valid_mask'] = valid_vis.view(-1, 3, valid_vis.shape[3], valid_vis.shape[4])  # [B, 3, H, W]
+        
+        # Visualize GT flow using Middlebury color scheme
+        gt_flow_vis = []
+        for i in range(batch_size):
+            flow_np = gt_flow[i].cpu()  # [2, H, W]
+            # Use visualize_flow which returns [H, W, 3] in range [0, 255]
+            flow_color = visualize_flow(flow_np, max_flow=None)
+            # Convert to torch tensor [3, H, W] in range [0, 1]
+            flow_color = torch.from_numpy(flow_color).permute(2, 0, 1).float() / 255.0
+            gt_flow_vis.append(flow_color)
+        visualizations['gt_flow'] = torch.stack(gt_flow_vis)  # [B, 3, H, W]
+        
+        # Visualize predicted flow if provided
+        if pred_flow is not None:
+            pred_flow_vis = []
+            for i in range(batch_size):
+                flow_np = pred_flow[i].cpu()  # [2, H, W]
+                flow_color = visualize_flow(flow_np, max_flow=None)
+                flow_color = torch.from_numpy(flow_color).permute(2, 0, 1).float() / 255.0
+                pred_flow_vis.append(flow_color)
+            visualizations['pred_flow'] = torch.stack(pred_flow_vis)  # [B, 3, H, W]
+        
+        return visualizations
         
         
     def train_epoch(self) -> Dict[str, float]:
@@ -142,6 +199,26 @@ class SNNTrainer:
                 
                 self.logger.log_scalar('train/flow_max', flow_max, self.global_step)
                 self.logger.log_scalar('train/flow_avg', flow_avg, self.global_step)
+            
+            # Log images at specified interval (less frequent than scalars)
+            image_log_interval = self.config.get('image_log_interval', 100)
+            if self.global_step % image_log_interval == 0:
+                visualizations = self._visualize_batch(
+                    inputs, gt_flow, valid_mask, 
+                    pred_flow=outputs['flow'],
+                    max_images=self.config.get('max_images_log', 4)
+                )
+                
+                # Log each visualization type
+                for vis_name, vis_tensor in visualizations.items():
+                    if vis_name == 'events' or vis_name == 'valid_mask':
+                        # For events and valid mask, vis_tensor is [B*T, 3, H, W]
+                        nrow = self.config.get('num_bins', 10)
+                    else:
+                        nrow = 2  # For flow visualizations
+                    # TensorBoard expects grid of images, so we make a grid
+                    grid = make_grid(vis_tensor, nrow=nrow, normalize=False, pad_value=1.0)
+                    self.logger.log_image(f'train/{vis_name}', grid, self.global_step)
                 
             
             self.global_step += 1
@@ -179,7 +256,10 @@ class SNNTrainer:
         val_flow_avg = 0.0
         num_batches = 0
         
-        for batch in tqdm(self.val_loader, desc="Validation"):
+        # Store first batch for visualization
+        first_batch_vis = None
+        
+        for batch_idx, batch in enumerate(tqdm(self.val_loader, desc="Validation")):
             # Move to device
             inputs = batch['input'].to(self.device)
             gt_flow = batch['flow'].to(self.device)
@@ -223,6 +303,15 @@ class SNNTrainer:
             val_flow_avg += flow_avg
 
             num_batches += 1
+            
+            # Store first batch for visualization
+            if batch_idx == 0:
+                first_batch_vis = {
+                    'inputs': inputs,
+                    'gt_flow': gt_flow,
+                    'valid_mask': valid_mask,
+                    'pred_flow': outputs['flow']
+                }
         
         # Average
         for key in val_losses:
@@ -235,6 +324,26 @@ class SNNTrainer:
         val_outliers /= num_batches
         val_flow_max /= num_batches
         val_flow_avg /= num_batches
+        
+        # Log validation images
+        if first_batch_vis is not None:
+            visualizations = self._visualize_batch(
+                first_batch_vis['inputs'],
+                first_batch_vis['gt_flow'],
+                first_batch_vis['valid_mask'],
+                pred_flow=first_batch_vis['pred_flow'],
+                max_images=self.config.get('max_images_log', 4)
+            )
+            
+            for vis_name, vis_tensor in visualizations.items():
+                if vis_name == 'events' or vis_name == 'valid_mask':
+                    # For events and valid mask, vis_tensor is [B*T, 3, H, W]
+                    nrow = self.config.get('num_bins', 10)
+                else:
+                    nrow = 2  # For flow visualizations
+                # TensorBoard expects grid of images, so we make a grid
+                grid = make_grid(vis_tensor, nrow=nrow, normalize=False, pad_value=1.0)
+                self.logger.log_image(f'val/{vis_name}', grid, self.global_step)
         
         return {
             **val_losses,
@@ -299,7 +408,7 @@ class SNNTrainer:
         print(f"Configuration: {json.dumps(self.config, indent=2)}")
         
         start_epoch = self.epoch
-        
+
         for epoch in range(start_epoch, num_epochs):
             self.epoch = epoch
             
