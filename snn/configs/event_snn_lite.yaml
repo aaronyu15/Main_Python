@@ -6,11 +6,11 @@ model_type: 'EventSNNFlowNetLite'   # Event-aware SNN architecture
 use_polarity: false                # Use separate channels for event polarities
 num_bins: 5                       # Event temporal bins - controls temporal history length
 bin_interval_us: 5000
-base_ch: 8                        # Base number of channels in encoder
+base_ch: 4                        # Base number of channels in encoder
 
 enable_logging_params: false                    # Log model parameters and statistics to TensorBoard
 
-# Model layer settings
+# Model layer setting
 conv_type: 'SpikingConvBlock'
 lif_type: 'QuantizedLIF'
 decay: 0.5                         # LIF neuron decay factor (0-1, smaller = faster decay)
@@ -30,7 +30,7 @@ act_bit_width: 8
 mem_bit_width: 8
 
 # Training Settings
-num_epochs: 100                   # Faster training for prototyping
+num_epochs: 200                   # Faster training for prototyping
 batch_size: 4                      # Larger batch for small model
 val_batch_size: 4
 num_workers: 4                      # Use 0 to avoid multiprocessing with h5py
@@ -38,14 +38,16 @@ num_workers: 4                      # Use 0 to avoid multiprocessing with h5py
 # Optimizer Settings
 learning_rate: 0.002               # Higher LR for faster convergence
 weight_decay: 0.01
-lr_milestones: [50, 75, 100]
+lr_milestones: null
 lr_gamma: 0.5
 
 # Loss Weights
 endpoint_weight: 1.00
 angular_weight: 2.00             
 outlier_weight: 0.0           
-effective_epe_weights: [1.00, 5.00, 5.0, 0.0, 0.0]  # Weights for effective EPE at different thresholds
+smoothness_weight: 0.01
+vertical_weight: 2.0             # New weight for vertical flow component
+effective_epe_weights: [1.00, 3.00, 3.0, 0.0, 0.0]  # Weights for effective EPE at different thresholds
 
 # Data Settings
 data_root: '../blink_sim/output/train' # Path to dataset root directory
@@ -53,6 +55,7 @@ camera_size: [320, 320]
 use_events: true
 max_train_samples: null             # Limit for fast prototyping
 max_val_samples: null
+augment_rotation: false              # Random 90° rotations (0°, 90°, 180°, 270°)
 
 # Patch-based processing
 patch_mode: false

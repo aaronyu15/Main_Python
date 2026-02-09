@@ -160,128 +160,9 @@ def visualize_flow(flow: torch.Tensor, max_flow: Optional[float] = None) -> np.n
         return flow_to_color(flow, max_flow)
 
 
-def save_flow_image(flow: torch.Tensor, filepath: str, max_flow: Optional[float] = None):
-    """
-    Save flow as color image
-    
-    Args:
-        flow: Flow tensor [2, H, W]
-        filepath: Path to save image
-        max_flow: Maximum flow for normalization
-    """
-    from PIL import Image
-    
-    # Visualize
-    flow_color = visualize_flow(flow, max_flow)
-    
-    # Save
-    img = Image.fromarray(flow_color)
-    img.save(filepath)
-    print(f"Saved flow visualization to {filepath}")
 
 
-def create_flow_legend(max_flow: float = 10.0, size: int = 256) -> np.ndarray:
-    """
-    Create a color wheel legend for flow visualization
-    
-    Args:
-        max_flow: Maximum flow magnitude
-        size: Size of the legend image
-    
-    Returns:
-        Legend image [size, size, 3]
-    """
-    # Create coordinate grid
-    y, x = np.mgrid[-1:1:size*1j, -1:1:size*1j]
-    
-    # Create circular flow pattern
-    flow = np.stack([x, y], axis=-1) * max_flow
-    
-    # Mask to create circular legend
-    radius = np.sqrt(x**2 + y**2)
-    mask = radius <= 1.0
-    
-    # Visualize
-    legend = flow_to_color(flow, max_flow)
-    
-    # Apply mask (white background outside circle)
-    legend[~mask] = 255
-    
-    return legend
-
-
-def plot_flow_comparison(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
-                         input_image: Optional[torch.Tensor] = None,
-                         save_path: Optional[str] = None):
-    """
-    Plot comparison between predicted and ground truth flow
-    
-    Args:
-        pred_flow: Predicted flow [2, H, W]
-        gt_flow: Ground truth flow [2, H, W]
-        input_image: Optional input image [3, H, W]
-        save_path: Path to save figure
-    """
-    fig, axes = plt.subplots(1, 3 if input_image is None else 4, figsize=(15, 5))
-    
-    # Convert flows to color
-    max_flow = max(
-        torch.abs(gt_flow).max().item(),
-        torch.abs(pred_flow).max().item()
-    )
-    
-    pred_vis = visualize_flow(pred_flow, max_flow)
-    gt_vis = visualize_flow(gt_flow, max_flow)
-    
-    # Compute error
-    error = torch.sqrt(torch.sum((pred_flow - gt_flow) ** 2, dim=0))
-    error_np = error.detach().cpu().numpy()
-    
-    # Plot
-    idx = 0
-    
-    if input_image is not None:
-        if isinstance(input_image, torch.Tensor):
-            input_image = input_image.detach().cpu().numpy()
-        
-        # Handle different input formats
-        if input_image.shape[0] == 3:  # RGB
-            input_image = np.transpose(input_image, (1, 2, 0))
-            axes[idx].imshow(input_image)
-        else:  # Event voxels - show sum
-            axes[idx].imshow(input_image.sum(axis=0), cmap='gray')
-        
-        axes[idx].set_title('Input')
-        axes[idx].axis('off')
-        idx += 1
-    
-    axes[idx].imshow(gt_vis)
-    axes[idx].set_title('Ground Truth Flow')
-    axes[idx].axis('off')
-    idx += 1
-    
-    axes[idx].imshow(pred_vis)
-    axes[idx].set_title('Predicted Flow')
-    axes[idx].axis('off')
-    idx += 1
-    
-    im = axes[idx].imshow(error_np, cmap='jet')
-    axes[idx].set_title(f'Error (EPE: {error.mean().item():.2f})')
-    axes[idx].axis('off')
-    plt.colorbar(im, ax=axes[idx])
-    
-    plt.tight_layout()
-    
-    if save_path is not None:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"Saved comparison to {save_path}")
-    else:
-        plt.show()
-    
-    plt.close()
-
-
-def visualize_events(event_voxel: np.ndarray, brightness_scale: float = 0.5) -> np.ndarray:
+def visualize_events(event_voxel: np.ndarray, brightness_scale: float = 0.7) -> np.ndarray:
     """
     Visualize event voxel grid as RGB image (red=positive, blue=negative events)
     
@@ -298,7 +179,6 @@ def visualize_events(event_voxel: np.ndarray, brightness_scale: float = 0.5) -> 
     if isinstance(event_voxel, torch.Tensor):
         event_voxel = event_voxel.detach().cpu().numpy()
     
-    # Handle both voxel grid formats
     if event_voxel.shape[2] == 2:
         event_sum = event_voxel.sum(axis=0)  # [2, H, W]
         pos_events = event_sum[0]  # Positive events
@@ -324,48 +204,3 @@ def visualize_events(event_voxel: np.ndarray, brightness_scale: float = 0.5) -> 
     
     return event_rgb
 
-
-def visualize_spike_activity(spike_tensor: torch.Tensor, save_path: Optional[str] = None):
-    """
-    Visualize spike activity over time
-    
-    Args:
-        spike_tensor: Spike tensor [T, B, C, H, W] or [T, C, H, W]
-        save_path: Path to save visualization
-    """
-    if isinstance(spike_tensor, torch.Tensor):
-        spike_tensor = spike_tensor.detach().cpu().numpy()
-    
-    # Sum over spatial dimensions and channels
-    if spike_tensor.ndim == 5:
-        activity = spike_tensor.sum(axis=(2, 3, 4))  # [T, B]
-        num_plots = min(spike_tensor.shape[1], 4)  # Show up to 4 samples
-    else:
-        activity = spike_tensor.sum(axis=(1, 2, 3))  # [T]
-        num_plots = 1
-    
-    fig, axes = plt.subplots(num_plots, 1, figsize=(10, 3*num_plots))
-    if num_plots == 1:
-        axes = [axes]
-    
-    for i in range(num_plots):
-        if spike_tensor.ndim == 5:
-            axes[i].plot(activity[:, i])
-            axes[i].set_title(f'Sample {i} - Spike Activity Over Time')
-        else:
-            axes[i].plot(activity)
-            axes[i].set_title('Spike Activity Over Time')
-        
-        axes[i].set_xlabel('Timestep')
-        axes[i].set_ylabel('Total Spikes')
-        axes[i].grid(True)
-    
-    plt.tight_layout()
-    
-    if save_path is not None:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"Saved spike visualization to {save_path}")
-    else:
-        plt.show()
-    
-    plt.close()

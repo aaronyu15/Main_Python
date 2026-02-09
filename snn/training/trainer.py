@@ -45,6 +45,8 @@ class SNNTrainer:
             endpoint_weight=config.get('endpoint_weight', 1.0),
             angular_weight=config.get('angular_weight', 0.5),
             outlier_weight=config.get('outlier_weight', 1.0),
+            smoothness_weight=config.get('smoothness_weight', 1.0),
+            vertical_weight=config.get('vertical_weight', 1.0),
             effective_epe_weights=config.get('effective_epe_weights', [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         )
         
@@ -201,8 +203,7 @@ class SNNTrainer:
                 self.logger.log_scalar('train/flow_avg', flow_avg, self.global_step)
             
             # Log images at specified interval (less frequent than scalars)
-            image_log_interval = self.config.get('image_log_interval', 100)
-            if self.global_step % image_log_interval == 0:
+            if self.global_step % self.config.get('image_log_interval', 100) == 0:
                 visualizations = self._visualize_batch(
                     inputs, gt_flow, valid_mask, 
                     pred_flow=outputs['flow'],

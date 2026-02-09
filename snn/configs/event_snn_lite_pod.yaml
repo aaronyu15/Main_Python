@@ -3,50 +3,73 @@
 
 # Model Configuration
 model_type: 'EventSNNFlowNetLite'   # Event-aware SNN architecture
-in_channels: 2                       # Polarity channels (positive/negative events)
-num_bins: 5                         # Event temporal bins - controls temporal history length
-                                    # 5 bins = 1 frame period (reference)
-                                    # 8 bins = 1.6x frame period (60% more temporal history)
-                                    # 10 bins = 2x frame period (double temporal history)
-num_timesteps: 5                    # Not used by EventSNNFlowNetLite (uses num_bins instead)
-base_ch: 32                         # Base number of channels in encoder
-decay: 0.5                            # LIF neuron time constant
+use_polarity: false                # Use separate channels for event polarities
+num_bins: 5                       # Event temporal bins - controls temporal history length
+bin_interval_us: 5000
+base_ch: 4                        # Base number of channels in encoder
+
+enable_logging_params: false                    # Log model parameters and statistics to TensorBoard
+
+# Model layer setting
+conv_type: 'SpikingConvBlock'
+lif_type: 'QuantizedLIF'
+decay: 0.5                         # LIF neuron decay factor (0-1, smaller = faster decay)
 threshold: 1.0                      # LIF neuron firing threshold
+reset: 0.0
 alpha: 10.0                         # Surrogate gradient slope (higher = sharper)
+use_norm: false
+use_bias: false                      # Enable bias in convolutional layers
 
 # Quantization Settings (now supported by EventSNNFlowNetLite)
 # Note: Start with quantization OFF for baseline, or use 8-bit as starting point
 quantize_weights: false              # Enable weight quantization
 quantize_activations: false          # Enable activation quantization
 quantize_mem: false                  # Enable membrane potential quantization
-log_params: false                    # Log model parameters and statistics to TensorBoard
+weight_bit_width: 8
+act_bit_width: 8
+mem_bit_width: 8
 
 # Training Settings
-num_epochs: 100                     # Faster training for prototyping
+num_epochs: 50                   # Faster training for prototyping
 batch_size: 64                      # Larger batch for small model
 val_batch_size: 32
 num_workers: 32                     # Use 0 to avoid multiprocessing with h5py
 
 # Optimizer Settings
-learning_rate: 0.0002               # Higher LR for faster convergence
-weight_decay: 0.0001
-lr_milestones: [50, 75, 100]
+learning_rate: 0.001               # Higher LR for faster convergence
+weight_decay: 0.01
+lr_milestones: null
 lr_gamma: 0.5
 
 # Loss Weights
-flow_weight: 1.0
-angular_weight: 0.01              # Angular error loss weight (set >0 to enable)
+endpoint_weight: 1.00
+angular_weight: 2.00             
+outlier_weight: 0.0           
+smoothness_weight: 0.01
+vertical_weight: 2.0             # New weight for vertical flow component
+effective_epe_weights: [1.00, 3.00, 3.0, 0.0, 0.0]  # Weights for effective EPE at different thresholds
 
 # Data Settings
-data_root: '../train_set' # Path to dataset root directory
+data_root: '../blink_sim/output/train' # Path to dataset root directory
 camera_size: [320, 320]
 use_events: true
-crop_size: [320, 320]               # Smaller crops for speed
 max_train_samples: null             # Limit for fast prototyping
 max_val_samples: null
+augment_rotation: false              # Random 90° rotations (0°, 90°, 180°, 270°)
+
+# Patch-based processing
+patch_mode: false
+patch_size: 64
+activity_threshold: 4  # Minimum event count for patch extraction
+sparsify: true                     # Sparsify input patches by zeroing low-activity bins
+  
+# Flow clipping
+flow_clip_range: null
 
 # Training Loop Settings
 grad_clip: 1.0
 log_interval: 10
-save_interval: 5 
+save_interval: 5
+image_log_interval: 100
+
 

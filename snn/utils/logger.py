@@ -52,11 +52,9 @@ class Logger:
         with open(config_file, 'w') as f:
             json.dump(config, f, indent=2)
         
-        # Also log as text to tensorboard
         config_str = json.dumps(config, indent=2)
         self.log_text('config', config_str)
         
-        # Log model structure if provided
         if model is not None:
             model_str = str(model)
             model_file = self.log_dir / 'model_structure.txt'

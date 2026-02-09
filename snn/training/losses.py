@@ -1,7 +1,3 @@
-"""
-Loss functions for optical flow estimation
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -111,58 +107,71 @@ def angular_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
 
     return ang.mean().item()
 
-
-def multi_scale_endpoint_loss(flow_pyramid: Dict[str, torch.Tensor],
-                          gt_flow: torch.Tensor,
-                          valid_mask: Optional[torch.Tensor] = None,
-                          weights: Optional[Dict[str, float]] = None) -> torch.Tensor:
+def smoothness_loss(flow: torch.Tensor, valid_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
     """
-    Multi-scale flow loss
+    Smoothness loss to encourage spatially smooth flow fields
     
     Args:
-        flow_pyramid: Dictionary of predicted flows at different scales
-        gt_flow: Ground truth flow at original resolution [B, 2, H, W]
-        valid_mask: Valid regions at original resolution [B, 1, H, W]
-        weights: Loss weights for each scale
+        flow: Predicted flow [B, 2, H, W]
     
     Returns:
-        Weighted multi-scale loss
+        Smoothness loss
     """
-    if weights is None:
-        weights = {
-            'flow5': 0.32,
-            'flow4': 0.16,
-            'flow3': 0.08,
-            'flow2': 0.04
-        }
+    # Extract u and v components
+    pu, pv = flow[:, 0].unsqueeze(1), flow[:, 1].unsqueeze(1)
+    pu_right = F.pad(pu[:, :, :, 1:], (0, 1), mode='constant')
+    pu_down = F.pad(pu[:, :, 1:, :], (0, 0, 0, 1), mode='constant')
+    pv_right = F.pad(pv[:, :, :, 1:], (0, 1), mode='constant')
+    pv_down = F.pad(pv[:, :, 1:, :], (0, 0, 0, 1), mode='constant')
+
+    dot_right = pu * pu_right + pv * pv_right + 1.0
+    dot_down = pu * pu_down + pv * pv_down + 1.0
+
+
+    # 3D norms: sqrt(u^2 + v^2 + 1)
+    pnorm = torch.sqrt(pu * pu + pv * pv + 1.0)
+    p_right_norm = torch.sqrt(pu_right * pu_right + pv_right * pv_right + 1.0)
+    p_down_norm = torch.sqrt(pu_down * pu_down + pv_down * pv_down + 1.0)
+
+    cos_right = dot_right / (pnorm * p_right_norm + 1e-8)
+    cos_right = torch.clamp(cos_right, -0.999, 0.999)
+    ang_right = torch.acos(cos_right) * 180.0 / np.pi  # degrees
+    ang_right_error = ang_right > 20.0
+
+    cos_down = dot_down / (pnorm * p_down_norm + 1e-8)
+    cos_down = torch.clamp(cos_down, -0.999, 0.999)
+    ang_down = torch.acos(cos_down) * 180.0 / np.pi  # degrees
+    ang_down_error = ang_down > 20.0
+
+    if valid_mask is not None:
+        if valid_mask.dim() == 4:
+            valid_mask = valid_mask.squeeze(1)
+        valid_mask = valid_mask.to(dtype=ang_right.dtype)
+        return (ang_right * ang_right_error * valid_mask + ang_down * ang_down_error * valid_mask).sum() / (valid_mask.sum() + 1e-8)
+
+
+def vertical_loss (pred_flow: torch.Tensor, gt_flow: torch.Tensor, valid_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """
+    Vertical loss to encourage vertical consistency in flow fields
     
-    total_loss = 0.0
+    Args:
+        flow: Predicted flow [B, 2, H, W]
     
-    for scale_name, pred_flow in flow_pyramid.items():
-        if scale_name not in weights:
-            continue
-        
-        # Downsample ground truth to match prediction scale
-        _, _, h, w = pred_flow.shape
-        gt_flow_scaled = F.interpolate(gt_flow, size=(h, w), mode='bilinear', align_corners=False)
-        
-        # Scale the flow values
-        scale_factor_h = h / gt_flow.shape[2]
-        scale_factor_w = w / gt_flow.shape[3]
-        gt_flow_scaled[:, 0] *= scale_factor_w
-        gt_flow_scaled[:, 1] *= scale_factor_h
-        
-        # Downsample valid mask
-        if valid_mask is not None:
-            valid_mask_scaled = F.interpolate(valid_mask.float(), size=(h, w), mode='nearest')
-        else:
-            valid_mask_scaled = None
-        
-        # Compute loss at this scale
-        scale_loss = endpoint_error(pred_flow, gt_flow_scaled, valid_mask_scaled, loss_type='robust')
-        total_loss += weights[scale_name] * scale_loss
-    
-    return total_loss
+    Returns:
+        Vertical loss
+    """
+    # Extract u and v components
+    gu, gv = gt_flow[:, 0], gt_flow[:, 1]
+
+    weighted_gv = 1 + gv.abs() / (gu.abs() + gv.abs() + 1e-8)
+    epe = endpoint_error(pred_flow, gt_flow, valid_mask=None)
+    loss = epe * weighted_gv
+
+    if valid_mask is not None:
+        if valid_mask.dim() == 4:
+            valid_mask = valid_mask.squeeze(1)
+        valid_mask = valid_mask.to(dtype=loss.dtype)
+        return (loss * valid_mask).sum() / (valid_mask.sum() + 1e-8)
 
 
 class CombinedLoss(nn.Module):
@@ -174,12 +183,16 @@ class CombinedLoss(nn.Module):
         endpoint_weight: float = 1.0,
         angular_weight: float = 0.0,
         outlier_weight: float = 1.0,
+        smoothness_weight: float = 1.0,
+        vertical_weight: float = 0.0,
         effective_epe_weights: Optional[list] = [0.0, 0.0, 0.0, 0.0, 0.0],
     ):
         super().__init__()
         self.endpoint_weight = endpoint_weight
         self.angular_weight = angular_weight
         self.outlier_weight = outlier_weight
+        self.vertical_weight = vertical_weight
+        self.smoothness_weight = smoothness_weight
         self.eff_endpoint_weight = effective_epe_weights 
 
     def forward(
@@ -202,15 +215,11 @@ class CombinedLoss(nn.Module):
         """
         losses = {}
         
-        # Main flow loss
-        #if 'flow_pyramid' in outputs:
-        #    losses['endpoint_loss'] = multi_scale_endpoint_loss(
-        #        outputs['flow_pyramid'], gt_flow, valid_mask
-        #    )
-        #else:
         losses['endpoint_loss'] = endpoint_error(outputs['flow'], gt_flow, valid_mask)
         losses['angular_loss'] = angular_error(outputs['flow'], gt_flow, valid_mask)
         losses['outlier_loss'] = calculate_outliers(outputs['flow'], gt_flow, valid_mask, threshold=1.0)
+        losses['smoothness_loss'] = smoothness_loss(outputs['flow'], valid_mask)
+        losses['vertical_loss'] = vertical_loss(outputs['flow'], gt_flow, valid_mask)
 
         losses['endpoint_0p1_loss'] = calculate_effective_epe(outputs['flow'], gt_flow, valid_mask, threshold=0.1, threshold_max=1.0)
         losses['endpoint_1p0_loss'] = calculate_effective_epe(outputs['flow'], gt_flow, valid_mask, threshold=1.0, threshold_max=5.0)
@@ -223,6 +232,8 @@ class CombinedLoss(nn.Module):
             self.endpoint_weight * losses['endpoint_loss'] +
             self.angular_weight * losses['angular_loss'] +
             self.outlier_weight * losses['outlier_loss'] +
+            self.smoothness_weight * losses['smoothness_loss'] +
+            self.vertical_weight * losses['vertical_loss'] +
             self.eff_endpoint_weight[0] * losses['endpoint_0p1_loss'] +
             self.eff_endpoint_weight[1] * losses['endpoint_1p0_loss'] +
             self.eff_endpoint_weight[2] * losses['endpoint_5p0_loss'] +

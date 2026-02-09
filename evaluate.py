@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 from snn.models import EventSNNFlowNetLite
 from snn.dataset import OpticalFlowDataset
-from snn.utils import compute_metrics, visualize_flow, plot_flow_comparison, save_flow_image
+from snn.training import compute_metrics 
 
 from utils import *
 
@@ -22,12 +22,10 @@ def parse_args():
     
     parser.add_argument('--checkpoint', type=str, required=True,
                       help='Path to model checkpoint')
-    parser.add_argument('--data-root', type=str, default='../../blink_sim/output/train',
+    parser.add_argument('--data-root', type=str, default='../blink_sim/output/test_set',
                       help='Root directory for dataset')
     parser.add_argument('--output-dir', type=str, default='./results',
                       help='Directory to save results')
-    parser.add_argument('--save-visualizations', action='store_true',
-                      help='Save flow visualizations')
     parser.add_argument('--num-samples', type=int, default=None,
                       help='Number of samples to evaluate (None = all)')
     parser.add_argument('--device', type=str, default='cuda',
@@ -92,31 +90,11 @@ def evaluate(args):
             
             all_metrics.append(metrics)
             
-            # Save visualizations
-            if args.save_visualizations:
-                vis_dir = output_dir / 'visualizations'
-                vis_dir.mkdir(exist_ok=True)
-                
-                seq_name = metadata['sequence'][0]
-                frame_idx = metadata['index'][0].item()
-                
-                # Save flow visualization
-                save_path = vis_dir / f'{seq_name}_{frame_idx:06d}_pred.png'
-                save_flow_image(pred_flow[0], str(save_path))
-                
-                # Save comparison plot
-                comparison_path = vis_dir / f'{seq_name}_{frame_idx:06d}_comparison.png'
-                plot_flow_comparison(
-                    pred_flow[0],
-                    gt_flow[0],
-                    inputs[0],
-                    str(comparison_path)
-                )
     
     # Compute average metrics
     avg_metrics = {}
     for key in ['epe', 'outliers', 'angular_error']:
-        values = [m[key] for m in all_metrics]
+        values = [m[key].cpu().numpy() if type(m[key]) == torch.Tensor else m[key] for m in all_metrics]
         avg_metrics[key] = np.mean(values)
         avg_metrics[f'{key}_std'] = np.std(values)
     

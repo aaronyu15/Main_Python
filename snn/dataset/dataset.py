@@ -9,7 +9,9 @@ import torch
 from torch.utils.data import Dataset
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
+import h5py
 import glob
+import sys
 
 
 class OpticalFlowDataset(Dataset):
@@ -30,19 +32,7 @@ class OpticalFlowDataset(Dataset):
     """
     def __init__(
         self,
-        config: Optional[Dict] = None,
-        data_root: Optional[str] = None,
-        use_events: Optional[bool] = None,
-        num_bins: Optional[int] = None,
-        bin_interval_us: Optional[int] = None,
-        use_polarity: Optional[int] = None,
-        data_size: Optional[Tuple[int, int]] = None,
-        patch_mode: Optional[bool] = None,
-        patch_size: Optional[int] = None,
-        activity_threshold: Optional[int] = None,
-        flow_clip_range: Optional[Tuple[float, float]] = None,
-        min_event_count: Optional[int] = None,
-        return_full_frame: Optional[bool] = None
+        config: Optional[Dict] = None
     ):
         """
         Args:
@@ -58,37 +48,38 @@ class OpticalFlowDataset(Dataset):
             flow_clip_range: Optional (min, max) to clip flow values
             min_event_count: Minimum total event count for a sample (retries if below threshold)
             return_full_frame: If True (and patch_mode=True), also return full frame data alongside patch
+            augment_rotation: If True, apply random 90-degree rotations for data augmentation
         """
         # Use config as base, with individual args as overrides
         if config is None:
             config = {}
         
-        self.data_root = Path(data_root if data_root is not None else config.get('data_root', '../blink_sim/output'))
-        self.use_events = use_events if use_events is not None else config.get('use_events', True)
-        self.num_bins = num_bins if num_bins is not None else config.get('num_bins', 5)
-        self.bin_interval_us = bin_interval_us if bin_interval_us is not None else config.get('bin_interval_us', 10000)
-        self.use_polarity = use_polarity if use_polarity is not None else config.get('use_polarity', 2)
-        self.data_size = data_size if data_size is not None else tuple(config.get('data_size', (320, 320)))
-        self.patch_mode = patch_mode if patch_mode is not None else config.get('patch_mode', False)
-        self.patch_size = patch_size if patch_size is not None else config.get('patch_size', 64)
-        self.activity_threshold = activity_threshold if activity_threshold is not None else config.get('activity_threshold', 5)
-        self.flow_clip_range = flow_clip_range if flow_clip_range is not None else config.get('flow_clip_range', None)
-        self.min_event_count = min_event_count if min_event_count is not None else config.get('min_event_count', 500)
-        self.return_full_frame = return_full_frame if return_full_frame is not None else config.get('return_full_frame', False)
+        self.data_root = config.get('data_root', '../blink_sim/output')
+        self.use_events = config.get('use_events', True)
+        self.num_bins = config.get('num_bins', 5)
+        self.bin_interval_us = config.get('bin_interval_us', 10000)
+        self.use_polarity = config.get('use_polarity', False)
+        self.data_size = config.get('data_size', (320, 320))
+
+        self.patch_mode = config.get('patch_mode', False)
+        self.patch_size = config.get('patch_size', 64)
+        self.activity_threshold = config.get('activity_threshold', 5)
+
+        self.flow_clip_range = config.get('flow_clip_range', None)
+        self.return_full_frame = config.get('return_full_frame', False)
         self.sparsify = config.get('sparsify', False)
+
+        self.augment_rotation = config.get('augment_rotation', False)
         
         # Find all sequences
         self.sequences = self._find_sequences()
         
         # Build sample list
         self.samples = self._build_sample_list()
-        
-        if self.flow_clip_range is not None:
-            print(f"  Flow clipping: [{self.flow_clip_range[0]}, {self.flow_clip_range[1]}]")
+
     
     def _find_sequences(self) -> List[Path]:
-        """Find all sequence directories"""
-        split_dir = self.data_root
+        split_dir = Path(self.data_root)
         
         sequences = []
         for seq_dir in sorted(split_dir.iterdir()):
@@ -98,22 +89,17 @@ class OpticalFlowDataset(Dataset):
         return sequences
     
     def _build_sample_list(self) -> List[Dict]:
-        """Build list of all samples across sequences"""
         samples = []
         
         for seq_dir in self.sequences:
-            # Get flow files
             flow_dir = seq_dir / 'forward_flow'
             flow_files = sorted(flow_dir.glob('*.npy'))
             
-            # Get event or image files
             if self.use_events:
                 event_dir = seq_dir / 'events_left'
                 
-                # Check if events are in HDF5 format or individual npy files
                 event_h5_file = event_dir / 'events.h5'
                 if event_h5_file.exists():
-                    # Events stored in HDF5 - each flow file is a valid sample
                     num_frames = len(flow_files)
                     for flow_file in flow_files:
                         frame_idx = int(flow_file.stem)
@@ -122,7 +108,7 @@ class OpticalFlowDataset(Dataset):
                             'flow_path': flow_file,
                             'event_h5_path': event_h5_file,
                             'index': frame_idx,
-                            'num_frames': num_frames  # Total frames in sequence for time interpolation
+                            'num_frames': num_frames
                         })
         
         return samples
@@ -146,91 +132,44 @@ class OpticalFlowDataset(Dataset):
         # Load optical flow
         flow_data = np.load(sample_info['flow_path'])  # [H, W, 2] or [H, W, 3]
         
-        # Handle different flow formats
-        if flow_data.shape[2] == 3:
-            # Format: [u, v, valid] - extract flow and validity
-            flow = torch.from_numpy(flow_data[:, :, :2]).permute(2, 0, 1).float()  # [2, H, W]
-            valid_mask = torch.from_numpy(flow_data[:, :, 2:3]).permute(2, 0, 1).float()  # [1, H, W]
-        elif flow_data.shape[2] == 2:
-            # Format: [u, v] - assume all valid
-            flow = torch.from_numpy(flow_data).permute(2, 0, 1).float()  # [2, H, W]
-            valid_mask = torch.ones(1, flow_data.shape[0], flow_data.shape[1])
-        else:
-            raise ValueError(f"Unexpected flow shape: {flow_data.shape}")
+        # Format: [u, v, valid] - extract flow and validity
+        flow = torch.from_numpy(flow_data[:, :, :2]).permute(2, 0, 1).float()  # [2, H, W]
+        valid_mask = torch.from_numpy(flow_data[:, :, 2:3]).permute(2, 0, 1).float()  # [1, H, W]
         
-        # Load input (events or RGB)
-        if self.use_events:
-            # Check if events are in HDF5 or individual npy files
-            if 'event_h5_path' in sample_info:
-                # Load from HDF5
-                import h5py
-                frame_idx = sample_info['index']
+        frame_idx = sample_info['index']
 
-                try:
-                    with h5py.File(sample_info['event_h5_path'], 'r') as f:
-                        # Load all events' timestamps to determine frame boundaries
-                        all_t = f['events/t'][:]
+        try:
+            with h5py.File(sample_info['event_h5_path'], 'r') as f:
+                all_t = f['events/t'][:]
 
-                        # Compute time window for this frame
-                        # Assume flow FPS (typically 30-60 fps from total duration)
-                        if len(all_t) > 0:
-                            total_duration_us = all_t[-1] - all_t[0]
-                            t_start_us = all_t[0]
+                total_duration_us = all_t[-1] - all_t[0]
+                t_start_us = all_t[0]
 
-                            # Get number of flow frames from sequence info
-                            # Flow frames typically at ~30 fps, so compute interval
-                            num_flow_frames = sample_info.get('num_frames', 30)
-                            frame_interval_us = total_duration_us / max(1, num_flow_frames)
+                num_flow_frames = sample_info.get('num_frames', 30)
+                frame_interval_us = total_duration_us / max(1, num_flow_frames)
 
-                            # Base time per bin (using 5 bins as reference = 1 frame interval)
-                            # Each bin represents frame_interval_us / 5 microseconds
-                            # So total window = (num_bins / 5) * frame_interval_us
-                            # This means: 5 bins = 1 frame, 8 bins = 1.6 frames, 10 bins = 2 frames
-                            time_window_us = self.num_bins * self.bin_interval_us
+                time_window_us = self.num_bins * self.bin_interval_us
 
-                            # Time window ends at the current frame time
-                            t1 = t_start_us + (frame_idx + 1) * frame_interval_us
-                            t0 = t1 - time_window_us
+                t1 = t_start_us + (frame_idx + 1) * frame_interval_us
+                t0 = t1 - time_window_us
 
-                            # Find events in this time window using binary search
-                            start_idx = np.searchsorted(all_t, t0, side='left')
-                            end_idx = np.searchsorted(all_t, t1, side='left')
+                start_idx = np.searchsorted(all_t, t0, side='left')
+                end_idx = np.searchsorted(all_t, t1, side='left')
 
-                            # Load events in this time range
-                            x = np.array(f['events/x'][start_idx:end_idx])
-                            y = np.array(f['events/y'][start_idx:end_idx])
-                            t = np.array(f['events/t'][start_idx:end_idx])
-                            p = np.array(f['events/p'][start_idx:end_idx])
+                x = np.array(f['events/x'][start_idx:end_idx])
+                y = np.array(f['events/y'][start_idx:end_idx])
+                t = np.array(f['events/t'][start_idx:end_idx])
+                p = np.array(f['events/p'][start_idx:end_idx])
 
-                            # Convert polarity to -1/+1 if it's 0/1
-                            p = np.where(p == 0, -1, 1)
+                p = np.where(p == 0, -1, 1)
 
-                            # Combine into single array [N, 4] with columns [x, y, t, p]
-                            events = np.column_stack([x, y, t, p]).astype(np.float32)
-                        else:
+                events = np.column_stack([x, y, t, p]).astype(np.float32)
+        except Exception as e:
+            print(f"Warning: Failed to load events for frame {frame_idx}: {e}")
+            sys.exit(1)
+            
 
-                            events = np.column_stack([
-                                x[start:end],
-                                y[start:end],
-                                t[start:end],
-                                p[start:end]
-                            ]).astype(np.float32)
-                except Exception as e:
-                    # If loading fails, create empty events
-                    print(f"Warning: Failed to load events for frame {frame_idx}: {e}")
-                    events = np.zeros((0, 4), dtype=np.float32)
-
-                input_tensor = self._events_to_voxel_grid(events)  # [num_bins, H, W]
-            else:
-                # Load from individual npy file
-                events = np.load(sample_info['event_path'])  # Event array
-                input_tensor = self._events_to_voxel_grid(events)  # [num_bins, H, W]
-        else:
-            # Load RGB image
-            from PIL import Image
-            rgb = Image.open(sample_info['rgb_path']).convert('RGB')
-            rgb = np.array(rgb).astype(np.float32) / 255.0
-            input_tensor = torch.from_numpy(rgb).permute(2, 0, 1).float()  # [3, H, W]
+        input_tensor = self._events_to_voxel_grid(events)  # [num_bins, H, W]
         
         # Note: valid_mask was already created when loading flow
         # If not created (shouldn't happen), create default
@@ -247,6 +186,12 @@ class OpticalFlowDataset(Dataset):
         # Apply flow clipping if specified
         if self.flow_clip_range is not None:
             flow = torch.clamp(flow, self.flow_clip_range[0], self.flow_clip_range[1])
+    
+        # Apply random rotation augmentation if enabled
+        if self.augment_rotation:
+            input_tensor, flow, valid_mask = self._apply_rotation_augmentation(
+                input_tensor, flow, valid_mask
+            )
     
         # Extract single random patch from high-activity regions if in patch mode
         if self.patch_mode:
@@ -328,6 +273,55 @@ class OpticalFlowDataset(Dataset):
                     voxel_grid[bin_idx, pol_idx, y[i], x[i]] += 1.0
         
         return torch.from_numpy(voxel_grid)
+    
+    def _apply_rotation_augmentation(
+        self,
+        input_tensor: torch.Tensor,
+        flow: torch.Tensor,
+        valid_mask: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Apply random 90-degree rotation augmentation to input, flow, and valid mask
+        
+        Rotations are k*90 degrees (k=0,1,2,3) which preserves data quality and is efficient.
+        
+        Args:
+            input_tensor: Event voxel grid [num_bins, C, H, W] or RGB [3, H, W]
+            flow: Optical flow [2, H, W] where [0] is u (horizontal), [1] is v (vertical)
+            valid_mask: Valid flow mask [1, H, W]
+        
+        Returns:
+            Rotated (input_tensor, flow, valid_mask)
+        """
+        # Randomly choose rotation: 0, 90, 180, or 270 degrees
+        k = np.random.randint(0, 4)
+        
+        if k == 0:
+            # No rotation
+            return input_tensor, flow, valid_mask
+        
+        # Rotate spatial dimensions (k*90 degrees counter-clockwise)
+        # torch.rot90 rotates in the plane specified by dims, k times counter-clockwise
+        input_rotated = torch.rot90(input_tensor, k=k, dims=(-2, -1))
+        valid_rotated = torch.rot90(valid_mask, k=k, dims=(-2, -1))
+        
+        # Rotate flow field - both spatial dimensions AND flow vectors
+        flow_rotated = torch.rot90(flow, k=k, dims=(-2, -1))
+        
+        # Adjust flow vectors based on rotation
+        # Flow is [u, v] where u=horizontal (x-direction), v=vertical (y-direction)
+        # For 90° CCW:  (u, v) -> (-v, u)   [right becomes up, up becomes left]
+        # For 180°:     (u, v) -> (-u, -v)  [right becomes left, up becomes down]
+        # For 270° CCW: (u, v) -> (v, -u)   [right becomes down, up becomes right]
+        
+        if k == 1:  # 90° CCW
+            flow_rotated = torch.stack([-flow_rotated[1], flow_rotated[0]], dim=0)
+        elif k == 2:  # 180°
+            flow_rotated = torch.stack([-flow_rotated[0], -flow_rotated[1]], dim=0)
+        elif k == 3:  # 270° CCW (or 90° CW)
+            flow_rotated = torch.stack([flow_rotated[1], -flow_rotated[0]], dim=0)
+        
+        return input_rotated, flow_rotated, valid_rotated
     
     def _extract_single_patch(
         self,

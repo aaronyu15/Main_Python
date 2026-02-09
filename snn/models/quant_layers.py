@@ -115,6 +115,7 @@ class QuantizedConv2d(BaseLayer):
         k: int,
         s: int = 1,
         p: int = 0,
+        groups: int = 1,
         use_norm = None,
         use_bias = None,
         config: Optional[dict] = None,
@@ -127,10 +128,11 @@ class QuantizedConv2d(BaseLayer):
         self.forward_count = 0
         self.use_norm = config.get('use_norm', False) if use_norm is None else use_norm
         self.use_bias = config.get('use_bias', False) if use_bias is None else use_bias
+        self.groups = groups
         
         self.conv = nn.Conv2d(
             in_channels, out_channels, k,
-            s, p, bias=self.use_bias
+            s, p, groups=self.groups, bias=self.use_bias
         )
 
         if self.use_norm: 
@@ -157,6 +159,7 @@ class QuantizedConv2d(BaseLayer):
             input=x, 
             weight=weight, 
             bias=self.conv.bias,
+            groups=self.conv.groups,
             stride=self.conv.stride,
             padding=self.conv.padding,
         )
@@ -256,194 +259,3 @@ class SurrogateSpike(torch.autograd.Function):
         s = torch.sigmoid(alpha * x)
         grad = alpha * s * (1 - s)
         return grad_out * grad, None
-
-
-class QuantizedDepthBlock(BaseLayer):
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        k: int,
-        s: int = 1,
-        p: int = 0,
-        bias: bool = False,
-        config: Optional[dict] = None,
-        weight_bit_width: int = 8,
-        act_bit_width: int = 8,
-        layer_name: str = "dconv",
-    ):
-        super().__init__(config=config, weight_bit_width=weight_bit_width, act_bit_width=act_bit_width, layer_name=layer_name)
-        self.forward_count = 0
-        
-        self.depth = nn.Conv2d(
-            in_channels, in_channels, k,
-            s, p, groups=in_channels, bias=bias
-        )
-
-        self.point = nn.Conv2d(
-            in_channels, out_channels, kernel_size=1,
-            stride=1, padding=0, bias=bias
-        )
-
-        if self.quantize_weights:
-            self.weight_quant = QuantWeight()
-        
-        if self.quantize_activations:
-            self.act_quant = QuantAct(
-                config=config,
-                layer_name=self.layer_name,  
-            )
-        
-        self.weights = {'depth': self.depth.weight, 'point': self.point.weight}
-    
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass with quantized weights and activations
-        """
-
-        if self.quantize_weights and self.weight_bit_width < 32:
-            weight_depth = self.weight_quant(self.depth.weight)
-            weight_point = self.weight_quant(self.point.weight)
-        else:
-            weight_depth = self.depth.weight
-            weight_point = self.point.weight
-        
-        out = F.conv2d(
-            input=x, 
-            weight=weight_depth, 
-            bias=self.depth.bias,
-            stride=self.depth.stride,
-            padding=self.depth.padding,
-            groups=self.depth.groups,
-        )
-
-        out = F.conv2d(
-            input=out, 
-            weight=weight_point, 
-            bias=self.point.bias,
-            stride=self.point.stride,
-            padding=self.point.padding,
-        )
-        
-        if self.quantize_activations and self.act_bit_width < 32:   
-            out_act = self.act_quant(out)
-        else:
-            out_act = out
-        
-        self.forward_count += 1
-
-        self.log_params(x, out_act)
-        
-        return out_act
-
-class QuantizedFactorBlock(BaseLayer):
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        k: int,
-        s: int = 1,
-        p: int = 0,
-        bias: bool = False,
-        config: Optional[dict] = None,
-        weight_bit_width: int = 8,
-        act_bit_width: int = 8,
-        layer_name: str = "dconv",
-    ):
-        super().__init__(config=config, weight_bit_width=weight_bit_width, act_bit_width=act_bit_width, layer_name=layer_name)
-
-        self.forward_count = 0
-        
-        self.horz = nn.Conv2d(
-            in_channels, out_channels, kernel_size=(1,k),
-            stride=(1,s), padding=(0,p), bias=bias
-        )
-
-        self.vert = nn.Conv2d(
-            out_channels, out_channels, kernel_size=(k,1),
-            stride=(s,1), padding=(p,0), bias=bias
-        )
-
-        if self.quantize_weights:
-            self.weight_quant = QuantWeight()
-        
-        if self.quantize_activations:
-            self.act_quant = QuantAct(
-                config=config,
-                layer_name=self.layer_name,  
-            )
-        self.weight = {'horz': self.horz.weight, 'vert': self.vert.weight}
-    
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-
-        if self.quantize_weights and self.weight_bit_width < 32:
-            weight_horz = self.weight_quant(self.horz.weight)
-            weight_vert = self.weight_quant(self.vert.weight)
-        else:
-            weight_horz = self.horz.weight
-            weight_vert = self.vert.weight
-        
-        out = F.conv2d(
-            input=x, 
-            weight=weight_horz, 
-            bias=self.horz.bias,
-            stride=self.horz.stride,
-            padding=self.horz.padding,
-        )
-
-        out = F.conv2d(
-            input=out, 
-            weight=weight_vert, 
-            bias=self.vert.bias,
-            stride=self.vert.stride,
-            padding=self.vert.padding,
-        )
-        
-        if self.quantize_activations and self.act_bit_width < 32:   
-            out_act = self.act_quant(out)
-        else:
-            out_act = out
-        
-        self.forward_count += 1
-
-        self.log_params(x, out_act)
-        
-        return out_act
-
-
-class BinaryPassThrough(BaseLayer):
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        k: int,
-        s: int = 1,
-        p: int = 0,
-        bias: bool = False,
-        config: Optional[dict] = None,
-        weight_bit_width: int = 8,
-        act_bit_width: int = 8,
-        layer_name: str = "conv",
-    ):
-        super().__init__(config=config, weight_bit_width=weight_bit_width, act_bit_width=act_bit_width, layer_name=layer_name)
-        self.forward_count = 0
-        
-        self.conv = nn.Conv2d(
-            in_channels, out_channels, k,
-            s, p, bias=bias
-        )
-
-        if self.quantize_weights:
-            self.weight_quant = QuantWeight()
-        
-        if self.quantize_activations:
-            self.act_quant = QuantAct(
-                config=config,
-                layer_name=self.layer_name,  
-            )
-    
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        pass

@@ -136,11 +136,13 @@ def main() -> None:
     )
     ap.add_argument(
         "--stats",
+        default=True,
         action="store_true",
         help="Print simple tensor stats (min/max/mean/std)",
     )
     ap.add_argument(
         "--show-non-tensors",
+        default=True,
         action="store_true",
         help="Also show non-tensor entries inside the chosen dict",
     )
@@ -193,6 +195,7 @@ def main() -> None:
 
     print("\n[state_dict entries]")
     shown = 0
+    sum = 0
     for k, v in _iter_items(sd, key_re):
         if _is_tensor(v):
             t: torch.Tensor = v
@@ -201,6 +204,7 @@ def main() -> None:
                 base += " " + _tensor_stats(t)
             print(base)
             shown += 1
+            sum += t.numel()
         else:
             if args.show_non_tensors:
                 print(f"- {k}: {_summarize_value(v)}")
@@ -211,6 +215,7 @@ def main() -> None:
             if remaining:
                 print(f"... (stopped at --limit={args.limit}, remaining keys not shown)")
             break
+    print(f"\nTotal parameters in shown entries: {sum}")
 
 
 if __name__ == "__main__":

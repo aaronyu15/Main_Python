@@ -52,17 +52,6 @@ class BinaryWeight(torch.autograd.Function):
         return grad_output
 
 
-
-def compute_mse_scale(weight: torch.Tensor, bit_width: int) -> torch.Tensor:
-    qmin = -(2 ** (bit_width - 1))
-    qmax = 2 ** (bit_width - 1) - 1
-    min_val = weight.min()
-    max_val = weight.max()
-    scale = (max_val - min_val) / (qmax - qmin)
-    scale = torch.clamp(scale, min=1e-8)
-    return scale
-
-
 class SymmetricQuant(torch.autograd.Function):
     # Use symmetric x quantization, no zero-point
     @staticmethod

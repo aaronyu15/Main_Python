@@ -1,6 +1,7 @@
 import argparse
 import yaml
 import torch
+import numpy as np
 from pathlib import Path
 from torch.utils.data import DataLoader
 
@@ -8,6 +9,7 @@ from snn.models import EventSNNFlowNetLite
 from snn.dataset import OpticalFlowDataset
 from snn.training import SNNTrainer
 from snn.utils.logger import Logger
+import random
 
 from utils import *
 
@@ -19,11 +21,11 @@ def parse_args():
                       help='Path to configuration file')
     parser.add_argument('--resume', type=str, default=None,
                       help='Path to checkpoint to resume from')
-    parser.add_argument('--data-root', type=str, default='../blink_sim/output',
-                      help='Root directory for dataset')
     parser.add_argument('--checkpoint-dir', type=str, default='./checkpoints',
                       help='Directory to save checkpoints')
     parser.add_argument('--log-dir', type=str, default='./logs',
+                      help='Directory for logs')
+    parser.add_argument('--seed', type=int, default=42,
                       help='Directory for logs')
     
     return parser.parse_args()
@@ -72,7 +74,13 @@ def main():
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
-    
+
+    seed = args.seed
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if device == 'cuda':
+        torch.cuda.manual_seed_all(seed)
     
     model = build_model(config, device=device, train=True)
     print(f"Built model: {config.get('model_type', 'SpikingFlowNet')}")
@@ -89,7 +97,7 @@ def main():
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Number of parameters: {num_params:,}")
     
-    data_root = config.get('data_root', args.data_root)
+    data_root = config.get('data_root', None)
     train_loader, val_loader = build_dataloaders(config, data_root)
 
     print(f"Data root: {data_root}")

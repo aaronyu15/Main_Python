@@ -9,7 +9,6 @@ layer_params = {
     "QuantizedIF": QuantizedIF,
 }
 
-
 class SpikingConvBlock(nn.Module):
     def __init__(
         self,
@@ -18,6 +17,7 @@ class SpikingConvBlock(nn.Module):
         k=3,
         s=1,
         p=1,
+        groups=1,
         config=None,
         weight_bit_width=None,
         act_bit_width=None,
@@ -33,6 +33,7 @@ class SpikingConvBlock(nn.Module):
             k=k, 
             s=s, 
             p=p, 
+            groups=groups,
             config=config,
             weight_bit_width=weight_bit_width,
             act_bit_width=act_bit_width,
@@ -59,6 +60,7 @@ class ConvBlock(nn.Module):
         k=3,
         s=1,
         p=1,
+        groups=1,
         use_norm=None,
         use_bias=None,
         config=None,
@@ -75,6 +77,7 @@ class ConvBlock(nn.Module):
             k=k, 
             s=s, 
             p=p, 
+            groups=groups,
             use_norm=use_norm,
             use_bias=use_bias,
             config=config,
@@ -88,165 +91,6 @@ class ConvBlock(nn.Module):
         x = self.conv(x)
         
         return x
-
-class SpikingDepthBlock(nn.Module):
-    def __init__(
-        self,
-        in_ch,
-        out_ch,
-        k=3,
-        s=1,
-        p=1,
-        config=None,
-        weight_bit_width=None,
-        act_bit_width=None,
-        layer_name=None,
-    ):
-        super().__init__()
-
-        self.logger = None
-        self.layer_name = layer_name
-        
-        self.conv = QuantizedDepthBlock(
-            in_ch, out_ch, 
-            k=k, 
-            s=s, 
-            p=p, 
-            config=config,
-            weight_bit_width=weight_bit_width,
-            act_bit_width=act_bit_width,
-            layer_name=layer_name,
-        )
-
-        self.lif = layer_params[config.get("lif_type", "QuantizedLIF")](
-            config=config,
-            layer_name=layer_name,
-        )
-        
-    def forward(self, x, mem):
-        x = self.conv(x)
-
-        spk, mem = self.lif(x, mem)
-
-        return spk, mem
-
-class DepthBlock(nn.Module):
-    def __init__(
-        self,
-        in_ch,
-        out_ch,
-        k=3,
-        s=1,
-        p=1,
-        use_norm=None,
-        use_bias=None,
-        config=None,
-        weight_bit_width=None,
-        act_bit_width=None,
-        layer_name=None,
-    ):
-        super().__init__()
-
-        self.logger = None
-        self.layer_name = layer_name
-        
-        self.conv = QuantizedDepthBlock(
-            in_ch, out_ch, 
-            k=k, 
-            s=s, 
-            p=p, 
-            config=config,
-            weight_bit_width=weight_bit_width,
-            act_bit_width=act_bit_width,
-            layer_name=layer_name,
-        )
-
-    def forward(self, x):
-        x = self.conv(x)
-
-        return x
-
-class SpikingFactorBlock(nn.Module):
-    def __init__(
-        self,
-        in_ch,
-        out_ch,
-        k=3,
-        s=1,
-        p=1,
-        config=None,
-        weight_bit_width=None,
-        act_bit_width=None,
-        layer_name=None,
-    ):
-        super().__init__()
-
-        self.logger = None
-        self.layer_name = layer_name
-        
-        self.conv = QuantizedFactorBlock(
-            in_ch, out_ch, 
-            config=config,
-            k=k,
-            s=s,
-            p=p,
-            weight_bit_width=weight_bit_width,
-            act_bit_width=act_bit_width,
-            layer_name=layer_name,
-        )
-
-        self.lif = layer_params[config.get("lif_type", "QuantizedLIF")](
-            config=config,
-            layer_name=layer_name,
-        )
-        
-    def forward(self, x, mem):
-        x = self.conv(x)
-
-        spk, mem = self.lif(x, mem)
-
-        return spk, mem
-
-class SpikingSumBlock(nn.Module):
-    def __init__(
-        self,
-        in_ch,
-        out_ch,
-        k=3,
-        s=1,
-        p=1,
-        config=None,
-        weight_bit_width=None,
-        act_bit_width=None,
-        layer_name=None,
-    ):
-        super().__init__()
-
-        self.logger = None
-        self.layer_name = layer_name
-        
-        self.conv = QuantizedSumBlock(
-            in_ch, out_ch, 
-            config=config,
-            k=k,
-            s=s,
-            p=p,
-            weight_bit_width=weight_bit_width,
-            act_bit_width=act_bit_width,
-            layer_name=layer_name,
-        )
-
-        self.lif = layer_params[config.get("lif_type", "QuantizedLIF")](
-            config=config,
-            layer_name=layer_name,
-        )
-        
-    def forward(self, x, mem):
-        x = self.conv(x)
-
-        spk, mem = self.lif(x, mem)
-
-        return spk, mem
 
 class SpikingLinearBlock(nn.Module):
     def __init__(

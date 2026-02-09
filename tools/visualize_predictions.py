@@ -15,28 +15,7 @@ from snn.dataset import OpticalFlowDataset
 from snn.utils import flow_to_color, visualize_events
 
 
-def load_dataset(config: dict, data_root: Optional[str] = None) -> OpticalFlowDataset:
-    
-    dataset_config = config.copy()
-    if data_root is not None:
-        dataset_config['data_root'] = data_root
-    dataset_config['max_train_samples'] = None  # Load all samples
-    
-    dataset = OpticalFlowDataset(config=dataset_config)
-    
-    return dataset
-
-
 def get_sequences(dataset: OpticalFlowDataset) -> Dict[str, list]:
-    """
-    Get all available sequences and their sample indices
-    
-    Args:
-        dataset: Dataset instance
-    
-    Returns:
-        Dictionary mapping sequence names to lists of sample indices
-    """
     sequences = {}
     for idx, sample_info in enumerate(dataset.samples):
         seq_name = sample_info['sequence']
@@ -48,12 +27,6 @@ def get_sequences(dataset: OpticalFlowDataset) -> Dict[str, list]:
 
 
 def list_sequences(dataset: OpticalFlowDataset):
-    """
-    Print all available sequences with their frame counts
-    
-    Args:
-        dataset: Dataset instance
-    """
     sequences = get_sequences(dataset)
     
     print("\nAvailable Sequences:")
@@ -71,31 +44,13 @@ def run_inference(
     sample: Dict[str, torch.Tensor],
     device: torch.device
 ) -> Tuple[torch.Tensor, Dict]:
-    """
-    Run inference on a single sample
-    
-    Args:
-        model: Trained model
-        sample: Sample dictionary from dataset
-        device: Device to run on
-    
-    Returns:
-        Tuple of (predicted_flow, metrics_dict)
-    """
-    # Move input to device and add batch dimension
     input_tensor = sample['input'].unsqueeze(0).to(device)
     flow_gt = sample['flow']
     
-    # Run inference
     output = model(input_tensor)
     
-    # Get predicted flow (remove batch dimension)
-    if isinstance(output, dict):
-        flow_pred = output['flow'].squeeze(0).cpu()
-    else:
-        flow_pred = output.squeeze(0).cpu()
+    flow_pred = output['flow'].squeeze(0).cpu()
     
-    # Compute metrics
     epe = torch.norm(flow_pred - flow_gt, p=2, dim=0).mean()
     
     metrics = {
@@ -128,15 +83,10 @@ def visualize_flow_comparison(
     """
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
     
-    # Convert flows to numpy
-    if isinstance(flow_gt, torch.Tensor):
-        flow_gt = flow_gt.cpu().numpy()
-    if isinstance(flow_pred, torch.Tensor):
-        flow_pred = flow_pred.cpu().numpy()
-    if isinstance(input_events, torch.Tensor):
-        input_events = input_events.cpu().numpy()
+    flow_gt = flow_gt.cpu().numpy()
+    flow_pred = flow_pred.cpu().numpy()
+    input_events = input_events.cpu().numpy()
     
-    # Compute max flow for consistent visualization
     max_flow = max(
         np.sqrt((flow_gt**2).sum(axis=0)).max(),
         np.sqrt((flow_pred**2).sum(axis=0)).max(),
@@ -144,14 +94,14 @@ def visualize_flow_comparison(
     )
     
     # Row 1: Input visualization
-    # Show events by polarity (red=positive, blue=negative)
 
-    # Sum across time bins: [num_bins, 2, H, W] -> [2, H, W]
+    # With polarity
     if input_events.shape[1] == 2:
         event_sum = input_events.sum(axis=0)  # [2, H, W]
         pos_events = event_sum[0]  # Positive events
         neg_events = event_sum[1]  # Negative events
     else:  
+    # no polarity
         event_sum = input_events.sum(axis=0)  # [2, H, W]
         pos_events = event_sum[0]  # Positive events
         neg_events = np.zeros_like(pos_events)  # No negative events
@@ -159,17 +109,15 @@ def visualize_flow_comparison(
     h, w = pos_events.shape
     event_rgb = np.zeros((h, w, 3), dtype=np.float32)
     
-    # Positive events -> red channel
     if pos_events.max() > 0:
-        event_rgb[:, :, 0] = pos_events / (pos_events.max() * 0.5)
+        event_rgb[:, :, 0] = pos_events / pos_events.max()
     
-    # Negative events -> blue channel
     if neg_events.max() > 0:
-        event_rgb[:, :, 2] = neg_events / (neg_events.max() * 0.5)
+        event_rgb[:, :, 2] = neg_events / neg_events.max()
     
     event_rgb = np.clip(event_rgb, 0, 1)
     axes[0, 0].imshow(event_rgb)
-    axes[0, 0].set_title('Input Events (red=pos, blue=neg)')
+    axes[0, 0].set_title('Input Events')
     axes[0, 0].axis('off')
     
     # Ground truth flow
@@ -356,7 +304,7 @@ def main():
         '--sample-idx',
         type=int,
         nargs='+',
-        default=[0, 10, 20, 30, 40],
+        default=[],
         help='Frame indices within the selected sequence to visualize (0-based)'
     )
     parser.add_argument(
@@ -370,12 +318,6 @@ def main():
         type=bool,
         default=True,
         help='Create animation of multiple samples'
-    )
-    parser.add_argument(
-        '--animation-samples',
-        type=int,
-        default=20,
-        help='Number of samples for animation (ignored if --sequence is specified)'
     )
     parser.add_argument(
         '--sequence',
@@ -422,7 +364,11 @@ def main():
     
     # Load dataset
     print("\nLoading dataset...")
-    dataset = load_dataset(config, args.data_root)
+    dataset_config = config.copy()
+    if args.data_root is not None:
+        dataset_config['data_root'] = args.data_root
+    dataset = OpticalFlowDataset(config=dataset_config)
+
     print(f"Loaded dataset with {len(dataset)} samples")
 
     # Map sequences to their dataset indices for convenient lookup
@@ -436,93 +382,48 @@ def main():
     # Validate requested sequence early
     if args.sequence and args.sequence not in sequences:
         print(f"\nError: Sequence '{args.sequence}' not found!")
-        print("Available sequences:")
-        for seq_name in sorted(sequences.keys()):
-            print(f"  - {seq_name}")
+        list_sequences(dataset)
         return
     
-    # Visualize individual samples using the requested sequence
-    if args.sequence:
-        raw_sequence_indices = sequences[args.sequence]
-        sequence_indices = raw_sequence_indices[:-1] if len(raw_sequence_indices) > 1 else raw_sequence_indices
-        if len(raw_sequence_indices) != len(sequence_indices):
-            print(f"\nNote: Skipping terminal frame for '{args.sequence}' to avoid missing forward-neighbor artifacts.")
-        print(f"\nVisualizing sequence '{args.sequence}' with {len(sequence_indices)} usable frames (of {len(raw_sequence_indices)})")
+    sequence_indices = sequences[args.sequence]
+    print(f"\nVisualizing sequence '{args.sequence}' with {len(sequence_indices)} usable frames (of {len(sequence_indices)})")
 
-        selected_pairs = []  # (frame_idx_in_sequence, dataset_idx)
+    selected_pairs = []
+    if len(args.sample_idx) > 0:
         for frame_idx in args.sample_idx:
             if frame_idx >= len(sequence_indices):
                 print(f"Warning: Frame {frame_idx} exceeds usable sequence length ({len(sequence_indices)}), skipping")
                 continue
             selected_pairs.append((frame_idx, sequence_indices[frame_idx]))
 
-        if not selected_pairs:
-            print("No valid frame indices selected; nothing to visualize.")
-            return
-    else:
-        # Fallback to global indices if no sequence is specified
-        selected_pairs = [(None, idx) for idx in args.sample_idx]
-        print(f"\nVisualizing samples (global indices): {args.sample_idx}")
+        for frame_idx, dataset_idx in selected_pairs:
+            if frame_idx is not None:
+                print(f"\nProcessing sequence frame {frame_idx} (dataset index {dataset_idx})...")
 
-    for frame_idx, dataset_idx in selected_pairs:
-        if dataset_idx >= len(dataset):
-            print(f"Warning: Sample {dataset_idx} exceeds dataset size, skipping")
-            continue
+            sample = dataset[dataset_idx]
 
-        if frame_idx is not None:
-            print(f"\nProcessing sequence frame {frame_idx} (dataset index {dataset_idx})...")
-        else:
-            print(f"\nProcessing sample {dataset_idx}...")
+            flow_pred, metrics = run_inference(model, sample, device)
 
-        sample = dataset[dataset_idx]
-        
-        # Run inference
-        flow_pred, metrics = run_inference(model, sample, device)
-        
-        print(f"  EPE: {metrics['epe']:.4f}")
-        print(f"  Max Flow GT: {metrics['max_flow_gt']:.2f}")
-        print(f"  Max Flow Pred: {metrics['max_flow_pred']:.2f}")
-        
-        # Visualize
-        save_path = output_dir / f"sample_{dataset_idx:04d}.png"
-        visualize_flow_comparison(
-            sample['input'],
-            sample['flow'],
-            flow_pred,
-            metrics,
-            save_path=str(save_path),
-            show=not args.no_show
-        )
+            print(f"  EPE: {metrics['epe']:.4f}")
+            print(f"  Max Flow GT: {metrics['max_flow_gt']:.2f}")
+            print(f"  Max Flow Pred: {metrics['max_flow_pred']:.2f}")
+
+            # Visualize
+            save_path = output_dir / f"sample_{dataset_idx:04d}.png"
+            visualize_flow_comparison(
+                sample['input'],
+                sample['flow'],
+                flow_pred,
+                metrics,
+                save_path=str(save_path),
+                show=not args.no_show
+            )
     
-    # Create animation if requested
     if args.create_animation:
-        # Determine which samples to animate
-        if args.sequence:
-            # Use specific sequence
-            if args.sequence not in sequences:
-                print(f"\nError: Sequence '{args.sequence}' not found!")
-                print("Available sequences:")
-                for seq_name in sorted(sequences.keys()):
-                    print(f"  - {seq_name}")
-                return
 
-            raw_animation_indices = sequences[args.sequence]
-            animation_indices = raw_animation_indices#[:-1] if len(raw_animation_indices) > 1 else raw_animation_indices
-            sequence_name = args.sequence
-            if len(raw_animation_indices) != len(animation_indices):
-                print(f"\nNote: Skipping terminal frame for '{args.sequence}' animation to avoid missing forward-neighbor artifacts.")
-            print(f"\nCreating animation for sequence '{args.sequence}' with {len(animation_indices)} frames (of {len(raw_animation_indices)})...")
-            animation_path = output_dir / f"{args.sequence}_animation.gif"
-        else:
-            # Select evenly spaced samples across all sequences
-            total_samples = len(dataset)
-            animation_indices = [
-                int(i * total_samples / args.animation_samples)
-                for i in range(args.animation_samples)
-            ]
-            sequence_name = None
-            print(f"\nCreating animation with {args.animation_samples} samples...")
-            animation_path = output_dir / "flow_animation.gif"
+        animation_indices = sequences[args.sequence]
+        sequence_name = args.sequence
+        animation_path = output_dir / f"{args.sequence}_animation.gif"
         
         create_flow_animation(
             model,
@@ -530,7 +431,7 @@ def main():
             animation_indices,
             device,
             str(animation_path),
-            fps=5,
+            fps=30,
             sequence_name=sequence_name
         )
     

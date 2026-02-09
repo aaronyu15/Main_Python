@@ -1,11 +1,3 @@
-"""
-Visualization script for testing trained SNN optical flow models on real CSV event data
-
-This script loads a trained model, runs inference on real CSV event data from blink_sim/output/real,
-and creates visualizations showing the event stream and predicted optical flow.
-Unlike visualize_predictions.py which uses HDF5 datasets, this works directly with CSV event files.
-"""
-
 import argparse
 import torch
 import numpy as np
@@ -15,15 +7,15 @@ from pathlib import Path
 from typing import Dict, Tuple, Optional, List
 import csv
 import sys
+from visualize_predictions import visualize_events, flow_to_color
 
-# Add parent directory to path to import from utils and snn
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import load_config, build_model
 from snn.utils import flow_to_color, visualize_events
 
 
-def load_events_from_csv(csv_path: str) -> np.ndarray:
+def load_events_from_csv(csv_path: str, use_polarity: bool) -> np.ndarray:
     """
     Load events from CSV file
     
@@ -45,8 +37,10 @@ def load_events_from_csv(csv_path: str) -> np.ndarray:
         reader = csv.reader(f)
         for row in reader:
             x, y, pol, t = row
-            # Convert polarity from 0/1 to -1/+1
-            pol_converted = 1 if int(pol) == 1 else -1
+            if use_polarity:
+                pol_converted = 1 if int(pol) == 1 else -1
+            else:
+                pol_converted = 1  # Default polarity if not used
             events_list.append([float(x), float(y), float(t), float(pol_converted)])
     
     return np.array(events_list, dtype=np.float32)
@@ -56,61 +50,48 @@ def events_to_voxel_grid(
     events: np.ndarray,
     num_bins: int,
     height: int = 320,
-    width: int = 320
+    width: int = 320,
+    use_polarity: bool = False
 ) -> torch.Tensor:
-    """
-    Convert event array to voxel grid representation
-    
-    Events format: [N, 4] where columns are [x, y, t, p]
-    - x, y: pixel coordinates
-    - t: timestamp
-    - p: polarity (+1 or -1)
-    
-    Args:
-        events: Event array [N, 4]
-        num_bins: Number of temporal bins
-        height: Image height
-        width: Image width
-    
-    Returns:
-        Voxel grid [num_bins, 2, H, W] for EventSNNFlowNetLite (polarity-separated)
-    """
+
     if len(events) == 0:
-        # Return zeros if no events
-        return torch.zeros(num_bins, 2, height, width)
-    
-    # Parse events
+        if use_polarity:
+            return torch.zeros(num_bins, 2, 320, 320) 
+        else:
+            return torch.zeros(num_bins, 1, 320, 320)  
+        
     x = events[:, 0].astype(np.int32)
     y = events[:, 1].astype(np.int32)
     t = events[:, 2]
     p = events[:, 3]
-    
-    # Normalize timestamps to [0, num_bins)
+        
     t_min, t_max = t.min(), t.max()
     if t_max > t_min:
         t_norm = (t - t_min) / (t_max - t_min) * (num_bins - 1e-6)
     else:
         t_norm = np.zeros_like(t)
-    
-    # Create voxel grid with separate polarity channels [num_bins, 2, H, W]
-    # Channel 0 = positive events, Channel 1 = negative events
-    voxel_grid = np.zeros((num_bins, 2, height, width), dtype=np.float32)
-    
-    # Distribute events into temporal bins with polarity separation
+        
+    if use_polarity:
+        voxel_grid = np.zeros((num_bins, 2, height, width), dtype=np.float32)
+    else:
+        voxel_grid = np.zeros((num_bins, 1, height, width), dtype=np.float32)
+        
     for i in range(len(events)):
         bin_idx = int(t_norm[i])
         if 0 <= bin_idx < num_bins:
             if 0 <= x[i] < width and 0 <= y[i] < height:
-                pol_idx = 0 if p[i] > 0 else 1  # Channel 0 = positive, 1 = negative
+                if use_polarity:
+                    pol_idx = 0 if p[i] > 0 else 1  
+                else:
+                    pol_idx = 0 
                 voxel_grid[bin_idx, pol_idx, y[i], x[i]] += 1.0
-    
+        
     return torch.from_numpy(voxel_grid)
 
 
 def create_time_windows(
     events: np.ndarray,
     window_duration_us: float,
-    stride_us: float,
     start_time_us: Optional[float] = None,
     end_time_us: Optional[float] = None
 ) -> List[Tuple[int, int, float, float]]:
@@ -148,7 +129,7 @@ def create_time_windows(
         end_idx = np.searchsorted(timestamps, current_end, side='left')
         
         windows.append((start_idx, end_idx, current_start, current_end))
-        current_start += stride_us
+        current_start += window_duration_us
     
     return windows
 
@@ -159,24 +140,10 @@ def run_inference(
     input_tensor: torch.Tensor,
     device: torch.device
 ) -> torch.Tensor:
-    """
-    Run inference on an input tensor
-    
-    Args:
-        model: Trained model
-        input_tensor: Input voxel grid [num_bins, 2, H, W]
-        device: Device to run on
-    
-    Returns:
-        Predicted flow [2, H, W]
-    """
-    # Add batch dimension and move to device
     input_batch = input_tensor.unsqueeze(0).to(device)
     
-    # Run inference
     output = model(input_batch)
     
-    # Get predicted flow (remove batch dimension)
     if isinstance(output, dict):
         flow_pred = output['flow'].squeeze(0).cpu()
     else:
@@ -192,45 +159,29 @@ def visualize_event_flow(
     show: bool = True,
     frame_info: str = ""
 ):
-    """
-    Create visualization of events and predicted flow
-    
-    Args:
-        input_events: Input event voxel grid [num_bins, 2, H, W]
-        flow_pred: Predicted flow [2, H, W]
-        save_path: Optional path to save figure
-        show: Whether to display the figure
-        frame_info: Additional information to display in title
-    """
+
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
     
-    # Convert to numpy
-    if isinstance(flow_pred, torch.Tensor):
-        flow_pred = flow_pred.cpu().numpy()
-    if isinstance(input_events, torch.Tensor):
-        input_events = input_events.cpu().numpy()
+    flow_pred = flow_pred.cpu().numpy()
+    input_events = input_events.cpu().numpy()
     
-    # Compute max flow for consistent visualization
     max_flow = max(np.sqrt((flow_pred**2).sum(axis=0)).max(), 1.0)
     
-    # Input events - visualize by polarity (red=positive, blue=negative)
     event_rgb = visualize_events(input_events)
     h, w = event_rgb.shape[:2]
     axes[0].imshow(event_rgb)
-    axes[0].set_title('Input Events (red=pos, blue=neg)')
+    axes[0].set_title('Input Events')
     axes[0].axis('off')
     
-    # Predicted flow (color-coded)
     flow_pred_color = flow_to_color(flow_pred, max_flow)
     axes[1].imshow(flow_pred_color)
     axes[1].set_title('Predicted Optical Flow')
     axes[1].axis('off')
     
-    # Flow vectors (quiver plot)
     step = max(h // 20, 1)
     y, x = np.mgrid[0:h:step, 0:w:step]
     u_pred = flow_pred[0, ::step, ::step]
-    v_pred = flow_pred[1, ::step, ::step]
+    v_pred = -flow_pred[1, ::step, ::step]  # Negate v for image coordinate system
     axes[2].quiver(x, y, u_pred, v_pred, scale=max_flow*5, color='cyan', alpha=0.7)
     axes[2].set_title('Flow Vectors')
     axes[2].set_xlim(0, w)
@@ -262,11 +213,10 @@ def create_flow_animation_from_csv(
     device: torch.device,
     save_path: str,
     num_bins: int = 5,
+    use_polarity: bool = False,
     height: int = 320,
     width: int = 320,
-    window_duration_ms: float = 50.0,
-    stride_ms: float = 33.3,  # ~30 fps
-    max_frames: Optional[int] = None,
+    window_duration_us: float = 50.0,
     fps: int = 5
 ):
     """
@@ -280,29 +230,21 @@ def create_flow_animation_from_csv(
         num_bins: Number of temporal bins for voxel grid
         height: Image height
         width: Image width
-        window_duration_ms: Duration of each time window in milliseconds
+        window_duration_us: Duration of each time window in milliseconds
         stride_ms: Time between window starts in milliseconds
-        max_frames: Maximum number of frames to generate (None = all)
         fps: Frames per second for animation
     """
     print(f"\nLoading events from {csv_path}...")
-    events = load_events_from_csv(csv_path)
+    events = load_events_from_csv(csv_path, use_polarity=use_polarity)
     print(f"Loaded {len(events):,} events")
     
     if len(events) == 0:
         print("No events found in CSV file!")
         return
     
-    # Convert milliseconds to microseconds
-    window_duration_us = window_duration_ms * 1000.0
-    stride_us = stride_ms * 1000.0
     
     # Create time windows
-    print(f"Creating time windows (duration={window_duration_ms}ms, stride={stride_ms}ms)...")
-    windows = create_time_windows(events, window_duration_us, stride_us)
-    
-    if max_frames is not None:
-        windows = windows[:max_frames]
+    windows = create_time_windows(events, window_duration_us, window_duration_us)
     
     print(f"Processing {len(windows)} time windows...")
     
@@ -317,7 +259,6 @@ def create_flow_animation_from_csv(
         
         # Convert to voxel grid
         voxel_grid = events_to_voxel_grid(window_events, num_bins, height, width)
-        print(torch.min(voxel_grid), torch.max(voxel_grid), torch.mean(voxel_grid))
         
         # Run inference
         flow_pred = run_inference(model, voxel_grid, device)
@@ -366,7 +307,7 @@ def create_flow_animation_from_csv(
         step = max(h // 20, 1)
         y, x = np.mgrid[0:h:step, 0:w:step]
         u_pred = flow_pred[0, ::step, ::step]
-        v_pred = flow_pred[1, ::step, ::step]
+        v_pred = -flow_pred[1, ::step, ::step]  # Negate v for image coordinate system
         axes[2].quiver(x, y, u_pred, v_pred, scale=max_flow*5, color='cyan', alpha=0.7)
         axes[2].set_title('Flow Vectors')
         axes[2].set_xlim(0, w)
@@ -432,58 +373,16 @@ def main():
         help='Directory to save visualizations'
     )
     parser.add_argument(
-        '--window-duration',
-        type=float,
-        default=33.33,
-        help='Duration of each time window in milliseconds (default: 50ms)'
-    )
-    parser.add_argument(
-        '--stride',
-        type=float,
-        default=33.33,
-        help='Time between window starts in milliseconds (default: 33.3ms = ~30fps)'
-    )
-    parser.add_argument(
         '--num-bins',
         type=int,
         default=5,
         help='Number of temporal bins for voxel grid (default: 5)'
     )
-    parser.add_argument(
-        '--height',
-        type=int,
-        default=320,
-        help='Image height (default: 320)'
-    )
-    parser.add_argument(
-        '--width',
-        type=int,
-        default=320,
-        help='Image width (default: 320)'
-    )
-    parser.add_argument(
-        '--max-frames',
-        type=int,
-        default=None,
-        help='Maximum number of frames to generate (default: all)'
-    )
-    parser.add_argument(
-        '--fps',
-        type=int,
-        default=30,
-        help='Frames per second for output animation (default: 5)'
-    )
-    parser.add_argument(
-        '--device',
-        type=str,
-        default='cuda' if torch.cuda.is_available() else 'cpu',
-        help='Device to run inference on'
-    )
+
     
     args = parser.parse_args()
     
-    # Setup
-    device = torch.device(args.device)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
@@ -492,22 +391,15 @@ def main():
         print(f"Error: CSV file not found: {csv_path}")
         return
     
-    print("="*60)
-    print("SNN Optical Flow Visualization - Real CSV Data")
-    print("="*60)
     
-    # Load configuration
-    print(f"\nLoading configuration from {args.config}")
-    config = load_config(args.config)
-    
-    # Override num_bins from config if specified
-    num_bins = config.get('num_bins', config.get('in_channels', args.num_bins))
-    print(f"Using {num_bins} temporal bins")
-    
-    # Load model
     print(f"\nLoading model from {args.checkpoint}")
-    model, _ = build_model(config, device=str(device), train=False, checkpoint_path=args.checkpoint)
-    print(f"Model loaded successfully on {device}")
+    model, config = build_model(None, device=str(device), train=False, checkpoint_path=args.checkpoint)
+
+    num_bins = config.get('num_bins', 5)
+    bin_interval_us = config.get('bin_interval_us', 5000.0)  # ms per bin
+
+    window_duration_us = num_bins * bin_interval_us
+    use_polarity = config.get('use_polarity', False)
     
     # Create animation
     output_filename = csv_path.stem + '_flow_animation.gif'
@@ -519,12 +411,11 @@ def main():
         device=device,
         save_path=str(output_path),
         num_bins=num_bins,
-        height=args.height,
-        width=args.width,
-        window_duration_ms=args.window_duration,
-        stride_ms=args.stride,
-        max_frames=args.max_frames,
-        fps=args.fps
+        use_polarity=use_polarity,
+        height=320,
+        width=320,
+        window_duration_us=window_duration_us,
+        fps=30
     )
     
     print("\n" + "="*60)
