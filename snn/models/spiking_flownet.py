@@ -8,10 +8,6 @@ import torch.nn.functional as F
 layers = {
     "SpikingConvBlock": SpikingConvBlock,
     "ConvBlock": ConvBlock,
-    "SpikingDepthBlock": SpikingDepthBlock,
-    "DepthBlock": DepthBlock,
-    "SpikingFactorBlock": SpikingFactorBlock,
-    "SpikingSumBlock": SpikingSumBlock,
     "SpikingLinearBlock": SpikingLinearBlock,
 }
 
