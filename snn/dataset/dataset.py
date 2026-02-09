@@ -67,7 +67,6 @@ class OpticalFlowDataset(Dataset):
 
         self.flow_clip_range = config.get('flow_clip_range', None)
         self.return_full_frame = config.get('return_full_frame', False)
-        self.sparsify = config.get('sparsify', False)
 
         self.augment_rotation = config.get('augment_rotation', False)
         
@@ -169,20 +168,14 @@ class OpticalFlowDataset(Dataset):
             sys.exit(1)
             
 
-        input_tensor = self._events_to_voxel_grid(events)  # [num_bins, H, W]
+        input_tensor = self._events_to_voxel_grid(events)  # [num_bins, C, H, W]
         
         # Note: valid_mask was already created when loading flow
         # If not created (shouldn't happen), create default
         if 'valid_mask' not in locals():
             valid_mask = torch.ones(1, flow.shape[1], flow.shape[2])
 
-        if self.sparsify:
-            # Sparsify input patch by zeroing out low-activity bins
-            activity_patch = input_tensor.sum(dim=(0, 1))
-            low_activity_mask = (activity_patch < 1)
 
-            input_tensor[:, :, low_activity_mask] = 0.0
-            valid_mask[:, low_activity_mask] = 0.0
         # Apply flow clipping if specified
         if self.flow_clip_range is not None:
             flow = torch.clamp(flow, self.flow_clip_range[0], self.flow_clip_range[1])
@@ -394,13 +387,6 @@ class OpticalFlowDataset(Dataset):
         # Valid mask for entire patch
         valid_patch = valid_mask[:, y-half:y+half, x-half:x+half]  # [1, P, P]
 
-        if self.sparsify:
-            # Sparsify input patch by zeroing out low-activity bins
-            activity_patch = input_patch.sum(dim=(0, 1))  # [P, P]
-            low_activity_mask = (activity_patch < 1)
-
-            input_patch[:, :, low_activity_mask] = 0.0
-            valid_patch[:, low_activity_mask] = 0.0
 
         return {
             'input': input_patch,      # [T, 2, P, P]

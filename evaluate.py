@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 from snn.models import EventSNNFlowNetLite
 from snn.dataset import OpticalFlowDataset
-from snn.training import compute_metrics 
+from snn.training import endpoint_error, calculate_outliers, angular_error
 
 from utils import *
 
@@ -84,7 +84,10 @@ def evaluate(args):
             pred_flow = outputs['flow']
             
             # Compute metrics
-            metrics = compute_metrics(pred_flow, gt_flow, valid_mask)
+            metrics = {}
+            metrics['epe'] = endpoint_error(pred_flow, gt_flow, valid_mask)
+            metrics['outliers'] = calculate_outliers(pred_flow, gt_flow, valid_mask, threshold=3.0)
+            metrics['angular_error'] = angular_error(pred_flow, gt_flow, valid_mask)
             metrics['sequence'] = metadata['sequence'][0]
             metrics['index'] = metadata['index'][0].item()
             

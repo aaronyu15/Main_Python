@@ -9,10 +9,13 @@ from typing import Dict, Optional
 import time
 import json
 from tqdm import tqdm
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
+import matplotlib.pyplot as plt
 
 from ..utils.logger import Logger
 from ..utils.visualization import visualize_flow
-from .losses import CombinedLoss, endpoint_error, calculate_effective_epe, calculate_outliers, calculate_multi_percentile_epe
+from .losses import CombinedLoss, effective_epe, calculate_outliers
 
 class SNNTrainer:
     def __init__(
@@ -44,7 +47,7 @@ class SNNTrainer:
         self.criterion = CombinedLoss(
             endpoint_weight=config.get('endpoint_weight', 1.0),
             angular_weight=config.get('angular_weight', 0.5),
-            outlier_weight=config.get('outlier_weight', 1.0),
+            epe_ang_weight=config.get('epe_ang_weight', 1.0),
             smoothness_weight=config.get('smoothness_weight', 1.0),
             vertical_weight=config.get('vertical_weight', 1.0),
             effective_epe_weights=config.get('effective_epe_weights', [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
@@ -63,6 +66,8 @@ class SNNTrainer:
             milestones=config.get('lr_milestones', [100, 150, 200]),
             gamma=config.get('lr_gamma', 0.5)
         )
+
+        self.event_mask = True
         
         self.epoch = 0
         self.global_step = 0
@@ -89,8 +94,7 @@ class SNNTrainer:
         
         # Visualize event input (sum across temporal bins and polarities)
         # Input is [B, num_bins, C, H, W] where C=2 for pos/neg polarities
-        event_sum = inputs[:batch_size].sum(dim=(2))  # [B, T, H, W]
-        event_sum = event_sum.unsqueeze(2)  # [B, T, 1, H, W]
+        event_sum = inputs[:batch_size].sum(dim=(2), keepdim=True)  # [B, T, 1, H, W] sum polarities
 
         # Convert to RGB by repeating grayscale
         event_vis = event_sum.repeat(1, 1, 3, 1, 1)  # [B, 3, H, W]
@@ -100,28 +104,120 @@ class SNNTrainer:
         valid_vis = valid_mask[:batch_size].repeat(1, 1, 3, 1, 1)  # [B, 3, H, W]
         visualizations['valid_mask'] = valid_vis.view(-1, 3, valid_vis.shape[3], valid_vis.shape[4])  # [B, 3, H, W]
         
+        max_flow = min(torch.norm(gt_flow, dim=1).max().item(), 1.0)
         # Visualize GT flow using Middlebury color scheme
         gt_flow_vis = []
         for i in range(batch_size):
             flow_np = gt_flow[i].cpu()  # [2, H, W]
             # Use visualize_flow which returns [H, W, 3] in range [0, 255]
-            flow_color = visualize_flow(flow_np, max_flow=None)
+            flow_color = visualize_flow(flow_np, max_flow=max_flow)
             # Convert to torch tensor [3, H, W] in range [0, 1]
             flow_color = torch.from_numpy(flow_color).permute(2, 0, 1).float() / 255.0
             gt_flow_vis.append(flow_color)
         visualizations['gt_flow'] = torch.stack(gt_flow_vis)  # [B, 3, H, W]
+
+        # Visualize GT flow using Middlebury color scheme
+        gt_flow_mask_vis = []
+        for i in range(batch_size):
+            flow = gt_flow[i] * valid_mask[i]  # Mask out invalid pixels
+            flow_np = flow.cpu()  # [2, H, W]
+            # Use visualize_flow which returns [H, W, 3] in range [0, 255]
+            flow_color = visualize_flow(flow_np, max_flow=max_flow)
+            # Convert to torch tensor [3, H, W] in range [0, 1]
+            flow_color = torch.from_numpy(flow_color).permute(2, 0, 1).float() / 255.0
+            gt_flow_mask_vis.append(flow_color)
+        visualizations['gt_flow_masked'] = torch.stack(gt_flow_mask_vis)  # [B, 3, H, W]
         
         # Visualize predicted flow if provided
         if pred_flow is not None:
             pred_flow_vis = []
             for i in range(batch_size):
                 flow_np = pred_flow[i].cpu()  # [2, H, W]
-                flow_color = visualize_flow(flow_np, max_flow=None)
+                flow_color = visualize_flow(flow_np, max_flow=max_flow)
                 flow_color = torch.from_numpy(flow_color).permute(2, 0, 1).float() / 255.0
                 pred_flow_vis.append(flow_color)
             visualizations['pred_flow'] = torch.stack(pred_flow_vis)  # [B, 3, H, W]
         
         return visualizations
+        
+    def _log_flow_histograms(
+        self,
+        pred_flow: torch.Tensor,
+        valid_mask: torch.Tensor,
+        prefix: str,
+        step: int
+    ):
+        """
+        Log histograms of predicted flow u and v components with same scale
+        
+        Args:
+            pred_flow: Predicted flow [B, 2, H, W]
+            valid_mask: Valid mask [B, 1, H, W]
+            prefix: Prefix for logging (e.g., 'train' or 'val')
+            step: Current training step
+        """
+        # Extract u and v components (only valid pixels)
+        u_flow = pred_flow[:, 0, :, :]  # [B, H, W]
+        v_flow = pred_flow[:, 1, :, :]  # [B, H, W]
+        valid = valid_mask[:, 0, :, :] > 0.5  # [B, H, W]
+        
+        # Flatten and filter by valid mask
+        u_valid = u_flow[valid].cpu()
+        v_valid = v_flow[valid].cpu()
+        
+        if len(u_valid) > 0 and len(v_valid) > 0:
+            # Compute common range for both histograms
+            min_val = min(u_valid.min().item(), v_valid.min().item())
+            max_val = max(u_valid.max().item(), v_valid.max().item())
+            
+            # Add small padding to range
+            range_pad = (max_val - min_val) * 0.05
+            min_val -= range_pad
+            max_val += range_pad
+            
+            # Create histogram figure
+            import io
+            from PIL import Image
+            
+            fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+            
+            # U component histogram
+            axes[0].hist(u_valid.detach().numpy(), bins=50, range=(min_val, max_val), 
+                        alpha=0.7, color='blue', edgecolor='black')
+            axes[0].set_xlabel('U Flow (horizontal)')
+            axes[0].set_ylabel('Frequency')
+            axes[0].set_title(f'U Component Distribution\nMin: {u_valid.min():.2f}, Max: {u_valid.max():.2f}, Mean: {u_valid.mean():.2f}')
+            axes[0].grid(True, alpha=0.3)
+            axes[0].set_xlim(min_val, max_val)
+            
+            # V component histogram
+            axes[1].hist(v_valid.detach().numpy(), bins=50, range=(min_val, max_val),
+                        alpha=0.7, color='green', edgecolor='black')
+            axes[1].set_xlabel('V Flow (vertical)')
+            axes[1].set_ylabel('Frequency')
+            axes[1].set_title(f'V Component Distribution\nMin: {v_valid.min():.2f}, Max: {v_valid.max():.2f}, Mean: {v_valid.mean():.2f}')
+            axes[1].grid(True, alpha=0.3)
+            axes[1].set_xlim(min_val, max_val)
+            
+            plt.tight_layout()
+            
+            # Convert figure to image tensor
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+            buf.seek(0)
+            img = Image.open(buf)
+            img_array = np.array(img)
+            plt.close(fig)
+            
+            # Convert to torch tensor [C, H, W] in range [0, 1]
+            img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).float() / 255.0
+            
+            # Log as image
+            self.logger.log_image(f'{prefix}/flow_histograms', img_tensor[:3], step)
+            
+            # Also log raw histogram data for TensorBoard's native histogram viewer
+            self.logger.log_histogram(f'{prefix}/flow_u', u_valid, step)
+            self.logger.log_histogram(f'{prefix}/flow_v', v_valid, step)
         
         
     def train_epoch(self) -> Dict[str, float]:
@@ -131,6 +227,7 @@ class SNNTrainer:
             'total_loss': 0.0,
             'endpoint_loss': 0.0,
             'angular_loss': 0.0,
+            'epe_ang_loss': 0.0,
         }
         epoch_outliers = 0.0
         epoch_flow_max = 0.0
@@ -146,8 +243,15 @@ class SNNTrainer:
             
             self.optimizer.zero_grad()
             outputs = self.model(inputs)
+
+            if self.event_mask:
+                activity_patch = inputs.sum(dim=(1, 2))
+                low_activity_mask = (activity_patch < 1)
+                low_activity_mask = low_activity_mask.unsqueeze(1)
+
+                valid_mask[low_activity_mask] = 0.0
             
-            losses = self.criterion(outputs, gt_flow, valid_mask)
+            losses = self.criterion(outputs, gt_flow, inputs, valid_mask)
             
             losses['total_loss'].backward()
 
@@ -158,12 +262,7 @@ class SNNTrainer:
 
                 outliers = calculate_outliers(outputs['flow'], gt_flow, valid_mask, threshold=1.0)
                 
-                epe_effective = calculate_effective_epe(outputs['flow'], gt_flow, valid_mask, threshold=0.1)
-                
-                percentile_metrics = calculate_multi_percentile_epe(
-                    outputs['flow'], gt_flow, valid_mask, 
-                    percentiles=[50, 75, 90, 95]
-                )
+                epe_effective = effective_epe(outputs['flow'], gt_flow, valid_mask, threshold_min=0.1)
                 
                 flow_pred = outputs['flow']
                 flow_mag = torch.norm(flow_pred, dim=1)
@@ -182,8 +281,8 @@ class SNNTrainer:
             pbar.set_postfix({
                 'loss': losses['total_loss'].item(),
                 'epe': losses['endpoint_loss'].item(),
+                'ang': losses['angular_loss'].item(),
                 'outliers': f'{outliers:.2f}%',
-                'lr': self.optimizer.param_groups[0]['lr']
             })
             
             if self.global_step % self.config.get('log_interval', 10) == 0:
@@ -193,9 +292,6 @@ class SNNTrainer:
                 self.logger.log_scalar('train/outliers', outliers, self.global_step)
                 self.logger.log_scalar('train/epe_effective', epe_effective, self.global_step)
                 
-                for key, value in percentile_metrics.items():
-                    if 'epe' in key:
-                        self.logger.log_scalar(f'train/{key}', value, self.global_step)
                 
                 self.logger.log_scalar('train/lr', self.optimizer.param_groups[0]['lr'], self.global_step)
                 
@@ -221,6 +317,9 @@ class SNNTrainer:
                     grid = make_grid(vis_tensor, nrow=nrow, normalize=False, pad_value=1.0)
                     self.logger.log_image(f'train/{vis_name}', grid, self.global_step)
                 
+                # Log flow histograms (u and v components with same scale)
+                self._log_flow_histograms(outputs['flow'], valid_mask, 'train', self.global_step)
+                
             
             self.global_step += 1
         
@@ -245,13 +344,10 @@ class SNNTrainer:
         val_losses = {
             'total_loss': 0.0,
             'endpoint_loss': 0.0,
-            'angular_loss': 0.0
+            'angular_loss': 0.0,
+            'epe_ang_loss': 0.0,
         }
         val_epe_effective = 0.0
-        val_epe_top50pct = 0.0
-        val_epe_top25pct = 0.0
-        val_epe_top10pct = 0.0
-        val_epe_top5pct = 0.0
         val_outliers = 0.0
         val_flow_max = 0.0
         val_flow_avg = 0.0
@@ -265,40 +361,36 @@ class SNNTrainer:
             inputs = batch['input'].to(self.device)
             gt_flow = batch['flow'].to(self.device)
             valid_mask = batch['valid_mask'].to(self.device)
+
+            if self.event_mask:
+                activity_patch = inputs.sum(dim=(1,2))
+                low_activity_mask = (activity_patch < 1)
+                low_activity_mask = low_activity_mask.unsqueeze(1)
+
+                valid_mask[low_activity_mask] = 0.0
             
             # Forward pass
             outputs = self.model(inputs)
             
             # Compute losses
-            losses = self.criterion(outputs, gt_flow, valid_mask)
+            losses = self.criterion(outputs, gt_flow, inputs, valid_mask)
             
             # Compute metrics
             outliers = calculate_outliers(outputs['flow'], gt_flow, valid_mask, threshold=1.0)
             
             # Effective pixel metrics
-            epe_effective = calculate_effective_epe(outputs['flow'], gt_flow, valid_mask, threshold=0.1)
-            
-            # Percentile-based metrics
-            percentile_metrics = calculate_multi_percentile_epe(
-                outputs['flow'], gt_flow, valid_mask,
-                percentiles=[50, 75, 90, 95]
-            )
+            epe_effective = effective_epe(outputs['flow'], gt_flow, valid_mask, threshold_min=0.1)
             
             flow_pred = outputs['flow']
             flow_mag = torch.norm(flow_pred, dim=1)
             flow_max = flow_mag.max().item()
             flow_avg = flow_mag.abs().mean().item()
             
-            val_losses['total_loss'] += losses['total_loss']
-            val_losses['endpoint_loss'] += losses['endpoint_loss']
-            val_losses['angular_loss'] += losses['angular_loss']
+            for key in val_losses:
+                val_losses[key] += losses[key]
             val_outliers += outliers
 
             val_epe_effective += epe_effective
-            val_epe_top50pct += percentile_metrics['epe_top50pct']
-            val_epe_top25pct += percentile_metrics['epe_top25pct']
-            val_epe_top10pct += percentile_metrics['epe_top10pct']
-            val_epe_top5pct += percentile_metrics['epe_top5pct']
 
             val_flow_max += flow_max
             val_flow_avg += flow_avg
@@ -318,10 +410,6 @@ class SNNTrainer:
         for key in val_losses:
             val_losses[key] /= num_batches
         val_epe_effective /= num_batches
-        val_epe_top50pct /= num_batches
-        val_epe_top25pct /= num_batches
-        val_epe_top10pct /= num_batches
-        val_epe_top5pct /= num_batches
         val_outliers /= num_batches
         val_flow_max /= num_batches
         val_flow_avg /= num_batches
@@ -345,14 +433,18 @@ class SNNTrainer:
                 # TensorBoard expects grid of images, so we make a grid
                 grid = make_grid(vis_tensor, nrow=nrow, normalize=False, pad_value=1.0)
                 self.logger.log_image(f'val/{vis_name}', grid, self.global_step)
+            
+            # Log flow histograms (u and v components with same scale)
+            self._log_flow_histograms(
+                first_batch_vis['pred_flow'], 
+                first_batch_vis['valid_mask'], 
+                'val', 
+                self.global_step
+            )
         
         return {
             **val_losses,
             'epe_effective': val_epe_effective,
-            'epe_top50pct': val_epe_top50pct,
-            'epe_top25pct': val_epe_top25pct,
-            'epe_top10pct': val_epe_top10pct,
-            'epe_top5pct': val_epe_top5pct,
             'outliers': val_outliers,
             'flow_max': val_flow_max,
             'flow_avg': val_flow_avg
@@ -392,6 +484,14 @@ class SNNTrainer:
         self.best_val_epe = checkpoint['best_val_epe']
         
         print(f"Loaded checkpoint from {filepath} (epoch {self.epoch})")
+
+    def update_settings(self, epoch: int):
+        """Update training settings based on epoch"""
+        # Example: Disable event mask after certain epoch
+        if self.config.get('event_mask_disable_epoch') is not None:
+            if epoch >= self.config['event_mask_disable_epoch'] and self.event_mask:
+                self.event_mask = False
+                print(f"Epoch {epoch}: Disabled event mask for training")
     
     def train(self, num_epochs: int, resume: Optional[str] = None):
         """
@@ -412,6 +512,8 @@ class SNNTrainer:
 
         for epoch in range(start_epoch, num_epochs):
             self.epoch = epoch
+
+            update_settings(epoch)
             
             # Train
             train_metrics = self.train_epoch()
@@ -424,10 +526,9 @@ class SNNTrainer:
             
             # Log epoch metrics
             print(f"\nEpoch {epoch} Summary:")
-            print(f"  Train - Loss: {train_metrics['total_loss']:.4f}, EPE: {train_metrics['endpoint_loss']:.4f}, Ang: {train_metrics['angular_loss']:.4f}, Outliers: {train_metrics['outliers']:.2f}%%")
-            print(f"  Val   - Loss: {val_metrics['total_loss']:.4f}, EPE: {val_metrics['endpoint_loss']:.4f}, Ang: {val_metrics['angular_loss']:.4f}, Outliers: {val_metrics['outliers']:.2f}%")
+            print(f"  Train - Loss: {train_metrics['total_loss']:.4f}, AngEPE: {train_metrics['epe_ang_loss']:.4f}, EPE: {train_metrics['endpoint_loss']:.4f}, Ang: {train_metrics['angular_loss']:.4f}, Outliers: {train_metrics['outliers']:.2f}%%")
+            print(f"  Val   - Loss: {val_metrics['total_loss']:.4f}, AngEPE: {val_metrics['epe_ang_loss']:.4f}, EPE: {val_metrics['endpoint_loss']:.4f}, Ang: {val_metrics['angular_loss']:.4f}, Outliers: {val_metrics['outliers']:.2f}%")
             print(f"  Val EPE (Effective) - All: {val_metrics['endpoint_loss']:.4f}, Flow>0.1: {val_metrics['epe_effective']:.4f}")
-            print(f"  Val EPE (Percentiles) - Top50%: {val_metrics['epe_top50pct']:.4f}, Top25%: {val_metrics['epe_top25pct']:.4f}, Top10%: {val_metrics['epe_top10pct']:.4f}, Top5%: {val_metrics['epe_top5pct']:.4f}")
             
             for key, value in train_metrics.items():
                 self.logger.log_scalar(f'epoch/train_{key}', value, epoch)
@@ -439,8 +540,8 @@ class SNNTrainer:
                 self.save_checkpoint(f'checkpoint_epoch_{epoch}.pth')
             
             # Save best model
-            if val_metrics['endpoint_loss'] < self.best_val_epe:
-                self.best_val_epe = val_metrics['endpoint_loss']
+            if val_metrics['epe_ang_loss'] < self.best_val_epe:
+                self.best_val_epe = val_metrics['epe_ang_loss']
                 self.save_checkpoint(is_best=True)
                 print(f"  New best validation EPE: {self.best_val_epe:.4f}")
         
