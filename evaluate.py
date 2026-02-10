@@ -30,8 +30,6 @@ def parse_args():
                       help='Number of samples to evaluate (None = all)')
     parser.add_argument('--device', type=str, default='cuda',
                       help='Device to use (cuda or cpu)')
-    parser.add_argument('--log-dir', type=str, default='./logs',
-                      help='Directory for logs')
     
     return parser.parse_args()
 

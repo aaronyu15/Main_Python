@@ -444,6 +444,7 @@ class SNNTrainer:
                 first_batch_vis['pred_flow'], 
                 first_batch_vis['valid_mask'], 
                 'val', 
+                'pred',
                 self.global_step
             )
         

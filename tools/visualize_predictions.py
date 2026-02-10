@@ -87,7 +87,7 @@ def visualize_flow_comparison(
     flow_pred = flow_pred.cpu().numpy()
     input_events = input_events.cpu().numpy()
     
-    max_flow = max(
+    max_flow = min(
         np.sqrt((flow_gt**2).sum(axis=0)).max(),
         np.sqrt((flow_pred**2).sum(axis=0)).max(),
         1.0
@@ -431,7 +431,7 @@ def main():
             animation_indices,
             device,
             str(animation_path),
-            fps=30,
+            fps=5,
             sequence_name=sequence_name
         )
     

@@ -70,25 +70,26 @@ class EventSNNFlowNetLite(nn.Module):
             layer_name="e3"
         ) # -> 16x16
 
-        #self.e4 = conv_layer(
-        #    self.base_ch*2, 
-        #    self.base_ch*2, 
-        #    k=3, 
-        #    s=1, 
-        #    p=1, 
-        #    config=config,
-        #    layer_name="e4"
-        #) # -> 16x16
+        self.e4 = conv_layer(
+            self.base_ch*2, 
+            self.base_ch*2, 
+            k=3, 
+            s=1, 
+            p=1, 
+            config=config,
+            layer_name="e4"
+        ) # -> 16x16
 
-        #self.d4 = conv_layer(
-        #    self.base_ch*2,
-        #    self.base_ch*2,
-        #    k=3,
-        #    s=1,
-        #    p=1,
-        #    config=config,
-        #    layer_name="d4",
-        #) # -> 32x32
+        self.d4 = conv_layer(
+            self.base_ch*2,
+            self.base_ch*2,
+            k=3,
+            s=1,
+            p=1,
+            groups=2,
+            config=config,
+            layer_name="d4",
+        ) # -> 32x32
 
         self.d3 = conv_layer(
             self.base_ch*2,
@@ -168,22 +169,22 @@ class EventSNNFlowNetLite(nn.Module):
             s1, mem_e1 = self.e1(xt, mem_e1)  # [N, base,   H/2, W/2]
             s2, mem_e2 = self.e2(s1, mem_e2)  # [N, 2base,  H/4, W/4]
             s3, mem_e3 = self.e3(s2, mem_e3) 
-            #s4, mem_e4 = self.e4(s3, mem_e4) 
+            s4, mem_e4 = self.e4(s3, mem_e4) 
 
-            #d4, mem_d4 = self.d4(s4, mem_d4)
-            #d4 = d4 + s3
+            d4, mem_d4 = self.d4(s4, mem_d4)
+            d4 = d4 + s3 if self.disable_skip is False else d4
 
             d3, mem_d3 = self.d3(s3, mem_d3)
             d3 = d3 + s2 if self.disable_skip is False else d3
 
-            d2 = F.interpolate(d3, scale_factor=2, mode="nearest")  # -> H/2
-            d2, mem_d2 = self.d2(d2, mem_d2)
-            d2 = d2 + s1 if self.disable_skip is False else d2
+            d2, mem_d2 = self.d2(d3, mem_d2)
+            d2 = F.interpolate(d2, scale_factor=2, mode="nearest")  # -> H/2
+            d2 = d2 + s1 if self.disable_skip is False else d2                                                                  
 
-            d1 = F.interpolate(d2, scale_factor=2, mode="nearest")  # -> H
-            d1, mem_d1 = self.d1(d1, mem_d1)
+            d1, mem_d1 = self.d1(d2, mem_d1)
+            mem_d1_i = F.interpolate(mem_d1, scale_factor=2, mode="nearest")  # -> H
 
-            dflow = self.flow_head(mem_d1)
+            dflow = self.flow_head(mem_d1_i)
 
             if flow_acc is None:
                 flow_acc = dflow

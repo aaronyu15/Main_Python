@@ -10,7 +10,7 @@ from traitlets import Bool
 
 def epe (pred_flow: torch.Tensor, gt_flow: torch.Tensor) -> torch.Tensor:
     # [B, 2, H, W] -> [B, 1, H, W]
-    return torch.norm(pred_flow - gt_flow, p=2, dim=1, keepdim=True)
+    return torch.log1p(torch.norm(pred_flow - gt_flow, p=2, dim=1, keepdim=True))
 
 def apply_mask(flow: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
     if mask is not None:
