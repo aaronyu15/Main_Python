@@ -34,6 +34,7 @@ class EventSNNFlowNetLite(nn.Module):
         self.use_polarity = config.get("use_polarity", True)
 
         self.logger = None  # TensorBoard logger
+        self.disable_skip = False
         
         conv_layer = layers[config.get("conv_type", "SpikingConvBlock")]
 
@@ -173,11 +174,11 @@ class EventSNNFlowNetLite(nn.Module):
             #d4 = d4 + s3
 
             d3, mem_d3 = self.d3(s3, mem_d3)
-            d3 = d3 + s2
+            d3 = d3 + s2 if self.disable_skip is False else d3
 
             d2 = F.interpolate(d3, scale_factor=2, mode="nearest")  # -> H/2
             d2, mem_d2 = self.d2(d2, mem_d2)
-            d2 = d2 + s1
+            d2 = d2 + s1 if self.disable_skip is False else d2
 
             d1 = F.interpolate(d2, scale_factor=2, mode="nearest")  # -> H
             d1, mem_d1 = self.d1(d1, mem_d1)

@@ -499,6 +499,11 @@ class SNNTrainer:
                 self.criterion.null_pred_weight = 1.0 # Enable null prediction loss when event mask is disabled
                 print(f"Epoch {epoch}: Disabled event mask for training")
 
+        if self.config.get('disable_skip_epoch') is not None:
+            if epoch >= self.config['disable_skip_epoch'] and self.model.disable_skip is False:
+                self.model.disable_skip = True
+                print(f"Epoch {epoch}: Disabled skip connections for training")
+
     
     def train(self, num_epochs: int, resume: Optional[str] = None):
         """

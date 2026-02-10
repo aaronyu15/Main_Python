@@ -57,6 +57,7 @@ max_train_samples: null             # Limit for fast prototyping
 max_val_samples: null
 augment_rotation: false              # Random 90° rotations (0°, 90°, 180°, 270°)
 event_mask_disable_epoch: 25
+disable_skip_epoch: 60
 
 # Patch-based processing
 patch_mode: false
