@@ -50,6 +50,7 @@ class SNNTrainer:
             epe_ang_weight=config.get('epe_ang_weight', 1.0),
             smoothness_weight=config.get('smoothness_weight', 1.0),
             vertical_weight=config.get('vertical_weight', 1.0),
+            null_pred_weight=0,
             effective_epe_weights=config.get('effective_epe_weights', [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         )
         
@@ -319,6 +320,9 @@ class SNNTrainer:
                 
                 # Log flow histograms (u and v components with same scale)
                 self._log_flow_histograms(outputs['flow'], valid_mask, 'train', self.global_step)
+
+                # Log flow histograms (u and v components with same scale)
+                self._log_flow_histograms(gt_flow, valid_mask, 'train', self.global_step)
                 
             
             self.global_step += 1
@@ -491,7 +495,9 @@ class SNNTrainer:
         if self.config.get('event_mask_disable_epoch') is not None:
             if epoch >= self.config['event_mask_disable_epoch'] and self.event_mask:
                 self.event_mask = False
+                self.criterion.null_pred_weight = 1.0 # Enable null prediction loss when event mask is disabled
                 print(f"Epoch {epoch}: Disabled event mask for training")
+
     
     def train(self, num_epochs: int, resume: Optional[str] = None):
         """
@@ -510,10 +516,10 @@ class SNNTrainer:
         
         start_epoch = self.epoch
 
-        for epoch in range(start_epoch, num_epochs):
+        for epoch in range(start_epoch, num_epochs+1):
             self.epoch = epoch
 
-            update_settings(epoch)
+            self.update_settings(epoch)
             
             # Train
             train_metrics = self.train_epoch()

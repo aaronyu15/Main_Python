@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 from snn.models import EventSNNFlowNetLite
 from snn.dataset import OpticalFlowDataset
-from snn.training import endpoint_error, calculate_outliers, angular_error
+from snn.training import endpoint_error, calculate_outliers, angular_error, epe_weighted_angular_error
 
 from utils import *
 
@@ -78,7 +78,7 @@ def evaluate(args):
             gt_flow = batch['flow'].to(device)
             valid_mask = batch['valid_mask'].to(device)
             metadata = batch['metadata']
-            
+
             # Forward pass
             outputs = model(inputs)
             pred_flow = outputs['flow']
@@ -88,6 +88,20 @@ def evaluate(args):
             metrics['epe'] = endpoint_error(pred_flow, gt_flow, valid_mask)
             metrics['outliers'] = calculate_outliers(pred_flow, gt_flow, valid_mask, threshold=3.0)
             metrics['angular_error'] = angular_error(pred_flow, gt_flow, valid_mask)
+            metrics['epe_weighted_angular_error'] = epe_weighted_angular_error(pred_flow, gt_flow, inputs, valid_mask)
+            metrics['valid_pixels'] = valid_mask.sum().item()
+
+            activity_patch = inputs.sum(dim=(1,2))
+            low_activity_mask = (activity_patch < 1)
+            low_activity_mask = low_activity_mask.unsqueeze(1)
+
+            valid_mask[low_activity_mask] = 0.0
+            metrics['epe_mask'] = endpoint_error(pred_flow, gt_flow, valid_mask)
+            metrics['outliers_mask'] = calculate_outliers(pred_flow, gt_flow, valid_mask, threshold=3.0)
+            metrics['angular_error_mask'] = angular_error(pred_flow, gt_flow, valid_mask)
+            metrics['epe_weighted_angular_error_mask'] = epe_weighted_angular_error(pred_flow, gt_flow, inputs, valid_mask)
+            metrics['valid_pixels_mask'] = valid_mask.sum().item()
+
             metrics['sequence'] = metadata['sequence'][0]
             metrics['index'] = metadata['index'][0].item()
             
@@ -96,7 +110,7 @@ def evaluate(args):
     
     # Compute average metrics
     avg_metrics = {}
-    for key in ['epe', 'outliers', 'angular_error']:
+    for key in ['epe', 'outliers', 'angular_error', 'epe_mask', 'outliers_mask', 'angular_error_mask', 'epe_weighted_angular_error', 'epe_weighted_angular_error_mask']:
         values = [m[key].cpu().numpy() if type(m[key]) == torch.Tensor else m[key] for m in all_metrics]
         avg_metrics[key] = np.mean(values)
         avg_metrics[f'{key}_std'] = np.std(values)
@@ -110,6 +124,11 @@ def evaluate(args):
     print(f"  EPE: {avg_metrics['epe']:.4f} ± {avg_metrics['epe_std']:.4f}")
     print(f"  Outliers: {avg_metrics['outliers']:.2f}% ± {avg_metrics['outliers_std']:.2f}%")
     print(f"  Angular Error: {avg_metrics['angular_error']:.2f}° ± {avg_metrics['angular_error_std']:.2f}°")
+    print(f"  EPE Weighted Angular Error: {avg_metrics['epe_weighted_angular_error']:.2f}° ± {avg_metrics['epe_weighted_angular_error_std']:.2f}°")
+    print(f"  EPE (Masked): {avg_metrics['epe_mask']:.4f} ± {avg_metrics['epe_mask_std']:.4f}")
+    print(f"  Outliers (Masked): {avg_metrics['outliers_mask']:.2f}% ± {avg_metrics['outliers_mask_std']:.2f}%")
+    print(f"  Angular Error (Masked): {avg_metrics['angular_error_mask']:.2f}° ± {avg_metrics['angular_error_mask_std']:.2f}°")
+    print(f"  EPE Weighted Angular Error (Masked): {avg_metrics['epe_weighted_angular_error_mask']:.2f}° ± {avg_metrics['epe_weighted_angular_error_mask_std']:.2f}°")
     print("="*50)
     
     # Save results to file
@@ -123,18 +142,21 @@ def evaluate(args):
         f.write(f"  EPE: {avg_metrics['epe']:.4f} ± {avg_metrics['epe_std']:.4f}\n")
         f.write(f"  Outliers: {avg_metrics['outliers']:.2f}% ± {avg_metrics['outliers_std']:.2f}%\n")
         f.write(f"  Angular Error: {avg_metrics['angular_error']:.2f}° ± {avg_metrics['angular_error_std']:.2f}°\n")
+        f.write(f"  EPE Weighted Angular Error: {avg_metrics['epe_weighted_angular_error']:.2f}° ± {avg_metrics['epe_weighted_angular_error_std']:.2f}°\n")
+        f.write(f"  EPE (Masked): {avg_metrics['epe_mask']:.4f} ± {avg_metrics['epe_mask_std']:.4f}\n")
+        f.write(f"  Outliers (Masked): {avg_metrics['outliers_mask']:.2f}% ± {avg_metrics['outliers_mask_std']:.2f}%\n")
+        f.write(f"  Angular Error (Masked): {avg_metrics['angular_error_mask']:.2f}° ± {avg_metrics['angular_error_mask_std']:.2f}°\n")
+        f.write(f"  EPE Weighted Angular Error (Masked): {avg_metrics['epe_weighted_angular_error_mask']:.2f}° ± {avg_metrics['epe_weighted_angular_error_mask_std']:.2f}°\n")
         f.write("\n" + "="*50 + "\n")
         f.write("\nPer-sample results:\n")
         for m in all_metrics:
-            f.write(f"{m['sequence']}_{m['index']:06d}: EPE={m['epe']:.4f}, "
-                   f"Outliers={m['outliers']:.2f}%, AngErr={m['angular_error']:.2f}°\n")
+            f.write(f"{m['sequence']}_{m['index']:06d}: \n")
+            f.write(f"EPE={m['epe']:.4f}, Outliers={m['outliers']:.2f}%, AngErr={m['angular_error']:.2f}°, EPE Weighted AngErr={m['epe_weighted_angular_error']:.2f}°, valid_pixels={m['valid_pixels']}\n")
+            f.write(f"EPE masked={m['epe_mask']:.4f}, Outliers masked={m['outliers_mask']:.2f}%, AngErr masked={m['angular_error_mask']:.2f}°, EPE Weighted AngErr masked={m['epe_weighted_angular_error_mask']:.2f}°, valid_pixels_mask={m['valid_pixels_mask']}\n")
     
     print(f"\nResults saved to {results_file}")
     
-    # Save metrics as numpy array
-    metrics_file = output_dir / f'metrics.npy'
-    np.save(metrics_file, all_metrics)
-    print(f"Metrics saved to {metrics_file}")
+
 
 
 if __name__ == '__main__':

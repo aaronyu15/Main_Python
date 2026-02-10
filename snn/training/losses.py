@@ -108,6 +108,16 @@ def epe_weighted_angular_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor, i
     
     return weighted_ang_error.sum() / (total_weight + 1e-8)
 
+def null_prediction_loss(pred_flow: torch.Tensor, gt_flow: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+
+    gt_mag = torch.sqrt(torch.sum(gt_flow ** 2, dim=1, keepdim=True))
+    zero_gt_mask = (gt_mag < 0.1).float()  # [B, 1, H, W]
+
+    null_pred_flow = pred_flow * zero_gt_mask  # [B, 2, H, W]
+
+    loss = torch.norm(null_pred_flow, p=2, dim=1, keepdim=True)  # [B, 1, H, W]
+
+    return loss.sum() / (zero_gt_mask.sum() + 1e-8)
 
 def smoothness_loss(flow: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
     # Extract u and v components
@@ -133,12 +143,12 @@ def smoothness_loss(flow: torch.Tensor, mask: Optional[torch.Tensor] = None) -> 
     cos_right = dot_right / (pnorm * p_right_norm + 1e-8)
     cos_right = torch.clamp(cos_right, -0.999, 0.999)
     ang_right = torch.acos(cos_right) * 180.0 / np.pi  # degrees
-    ang_right_error = ang_right > 20.0
+    ang_right_error = ang_right > 10.0
 
     cos_down = dot_down / (pnorm * p_down_norm + 1e-8)
     cos_down = torch.clamp(cos_down, -0.999, 0.999)
     ang_down = torch.acos(cos_down) * 180.0 / np.pi  # degrees
-    ang_down_error = ang_down > 20.0
+    ang_down_error = ang_down > 10.0
 
     ang_right, mask1 = apply_mask(ang_right, ang_right_error)
     ang_down, mask2 = apply_mask(ang_down, ang_down_error)
@@ -171,14 +181,18 @@ class CombinedLoss(nn.Module):
         epe_ang_weight: float = 0.0,
         smoothness_weight: float = 1.0,
         vertical_weight: float = 0.0,
+        null_pred_weight: float = 0.0,
         effective_epe_weights: Optional[list] = [0.0, 0.0, 0.0, 0.0, 0.0],
     ):
         super().__init__()
         self.endpoint_weight = endpoint_weight
         self.angular_weight = angular_weight
         self.epe_ang_weight = epe_ang_weight
+
         self.vertical_weight = vertical_weight
         self.smoothness_weight = smoothness_weight
+        self.null_pred_weight = null_pred_weight
+
         self.eff_endpoint_weight = effective_epe_weights 
 
     def forward(
@@ -208,6 +222,7 @@ class CombinedLoss(nn.Module):
 
         losses['smoothness_loss'] = smoothness_loss(outputs['flow'], mask)
         losses['vertical_loss'] = vertical_loss(outputs['flow'], gt_flow, mask)
+        losses['null_pred_loss'] = null_prediction_loss(outputs['flow'], gt_flow, mask)
 
         losses['endpoint_0p1_loss'] = effective_epe(outputs['flow'], gt_flow, mask, threshold_min=0.1, threshold_max=1.0)
         losses['endpoint_1p0_loss'] = effective_epe(outputs['flow'], gt_flow, mask, threshold_min=1.0, threshold_max=5.0)
@@ -221,6 +236,7 @@ class CombinedLoss(nn.Module):
             self.epe_ang_weight * losses['epe_ang_loss'] +
             self.smoothness_weight * losses['smoothness_loss'] +
             self.vertical_weight * losses['vertical_loss'] +
+            self.null_pred_weight * losses['null_pred_loss'] +
             self.eff_endpoint_weight[0] * losses['endpoint_0p1_loss'] +
             self.eff_endpoint_weight[1] * losses['endpoint_1p0_loss'] +
             self.eff_endpoint_weight[2] * losses['endpoint_5p0_loss'] +
