@@ -30,7 +30,7 @@ act_bit_width: 8
 mem_bit_width: 8
 
 # Training Settings
-num_epochs: 60                   # Faster training for prototyping
+num_epochs: 80                   # Faster training for prototyping
 batch_size: 64                     # Larger batch for small model
 val_batch_size: 32
 num_workers: 32                     # Use 0 to avoid multiprocessing with h5py
@@ -56,7 +56,7 @@ use_events: true
 max_train_samples: null             # Limit for fast prototyping
 max_val_samples: null
 augment_rotation: false              # Random 90° rotations (0°, 90°, 180°, 270°)
-event_mask_disable_epoch: 50
+event_mask_disable_epoch: 25
 
 # Patch-based processing
 patch_mode: false

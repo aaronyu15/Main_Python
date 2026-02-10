@@ -146,6 +146,7 @@ class SNNTrainer:
         pred_flow: torch.Tensor,
         valid_mask: torch.Tensor,
         prefix: str,
+        postfix: str,
         step: int
     ):
         """
@@ -214,11 +215,11 @@ class SNNTrainer:
             img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).float() / 255.0
             
             # Log as image
-            self.logger.log_image(f'{prefix}/flow_histograms', img_tensor[:3], step)
+            self.logger.log_image(f'{prefix}/flow_histograms_{postfix}', img_tensor[:3], step)
             
             # Also log raw histogram data for TensorBoard's native histogram viewer
-            self.logger.log_histogram(f'{prefix}/flow_u', u_valid, step)
-            self.logger.log_histogram(f'{prefix}/flow_v', v_valid, step)
+            self.logger.log_histogram(f'{prefix}/flow_u_{postfix}', u_valid, step)
+            self.logger.log_histogram(f'{prefix}/flow_v_{postfix}', v_valid, step)
         
         
     def train_epoch(self) -> Dict[str, float]:
@@ -319,10 +320,10 @@ class SNNTrainer:
                     self.logger.log_image(f'train/{vis_name}', grid, self.global_step)
                 
                 # Log flow histograms (u and v components with same scale)
-                self._log_flow_histograms(outputs['flow'], valid_mask, 'train', self.global_step)
+                self._log_flow_histograms(outputs['flow'], valid_mask, 'train', 'pred', self.global_step)
 
                 # Log flow histograms (u and v components with same scale)
-                self._log_flow_histograms(gt_flow, valid_mask, 'train', self.global_step)
+                self._log_flow_histograms(gt_flow, valid_mask, 'train', 'gt', self.global_step)
                 
             
             self.global_step += 1
