@@ -152,61 +152,6 @@ def run_inference(
     return flow_pred
 
 
-def visualize_event_flow(
-    input_events: torch.Tensor,
-    flow_pred: torch.Tensor,
-    save_path: Optional[str] = None,
-    show: bool = True,
-    frame_info: str = ""
-):
-
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-    
-    flow_pred = flow_pred.cpu().numpy()
-    input_events = input_events.cpu().numpy()
-    
-    max_flow = max(np.sqrt((flow_pred**2).sum(axis=0)).max(), 1.0)
-    
-    event_rgb = visualize_events(input_events)
-    h, w = event_rgb.shape[:2]
-    axes[0].imshow(event_rgb)
-    axes[0].set_title('Input Events')
-    axes[0].axis('off')
-    
-    flow_pred_color = flow_to_color(flow_pred, max_flow)
-    axes[1].imshow(flow_pred_color)
-    axes[1].set_title('Predicted Optical Flow')
-    axes[1].axis('off')
-    
-    step = max(h // 20, 1)
-    y, x = np.mgrid[0:h:step, 0:w:step]
-    u_pred = flow_pred[0, ::step, ::step]
-    v_pred = -flow_pred[1, ::step, ::step]  # Negate v for image coordinate system
-    axes[2].quiver(x, y, u_pred, v_pred, scale=max_flow*5, color='cyan', alpha=0.7)
-    axes[2].set_title('Flow Vectors')
-    axes[2].set_xlim(0, w)
-    axes[2].set_ylim(h, 0)
-    axes[2].set_facecolor('black')
-    axes[2].axis('off')
-    
-    plt.suptitle(
-        f'Real Data Optical Flow Prediction\n{frame_info}',
-        fontsize=14,
-        fontweight='bold'
-    )
-    
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"Saved visualization to {save_path}")
-    
-    if show:
-        plt.show()
-    else:
-        plt.close()
-
-
 def create_flow_animation_from_csv(
     model: torch.nn.Module,
     csv_path: str,
@@ -274,7 +219,7 @@ def create_flow_animation_from_csv(
     print("Creating animation...")
     
     # Create animation
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    fig, axes = plt.subplots(1, 4, figsize=(15, 5))
     
     def update_frame(frame_idx):
         """Update function for animation"""
@@ -302,18 +247,26 @@ def create_flow_animation_from_csv(
         axes[1].imshow(flow_pred_color)
         axes[1].set_title('Predicted Flow')
         axes[1].axis('off')
+
+        # Masked Predicted flow
+        input_mask = voxel_grid.sum(axis=0) > 0
+
+        masked_flow_pred_color = flow_to_color(flow_pred * input_mask, max_flow)
+        axes[2].imshow(masked_flow_pred_color)
+        axes[2].set_title('Masked Predicted Flow')
+        axes[2].axis('off')
         
         # Flow vectors
         step = max(h // 20, 1)
         y, x = np.mgrid[0:h:step, 0:w:step]
         u_pred = flow_pred[0, ::step, ::step]
         v_pred = -flow_pred[1, ::step, ::step]  # Negate v for image coordinate system
-        axes[2].quiver(x, y, u_pred, v_pred, scale=max_flow*5, color='cyan', alpha=0.7)
-        axes[2].set_title('Flow Vectors')
-        axes[2].set_xlim(0, w)
-        axes[2].set_ylim(h, 0)
-        axes[2].set_facecolor('black')
-        axes[2].axis('off')
+        axes[3].quiver(x, y, u_pred, v_pred, scale=max_flow*5, color='cyan', alpha=0.7)
+        axes[3].set_title('Flow Vectors')
+        axes[3].set_xlim(0, w)
+        axes[3].set_ylim(h, 0)
+        axes[3].set_facecolor('black')
+        axes[3].axis('off')
         
         # Update title
         title = (f'Frame {frame_idx+1}/{len(frames_data)} | '

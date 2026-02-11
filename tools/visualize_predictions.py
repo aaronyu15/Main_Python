@@ -52,9 +52,11 @@ def run_inference(
     flow_pred = output['flow'].squeeze(0).cpu()
     
     epe = torch.norm(flow_pred - flow_gt, p=2, dim=0).mean()
+    masked_epe = torch.norm((flow_pred - flow_gt) * (input_tensor.cpu().sum(dim=1).squeeze(0) > 0), p=2, dim=0).mean()
     
     metrics = {
         'epe': epe.item(),
+        'masked_epe': masked_epe.item(),
         'max_flow_gt': torch.norm(flow_gt, p=2, dim=0).max().item(),
         'max_flow_pred': torch.norm(flow_pred, p=2, dim=0).max().item(),
     }
@@ -203,7 +205,7 @@ def create_flow_animation(
         fps: Frames per second for animation
         sequence_name: Optional sequence name to display in title
     """
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
     
     def update_frame(frame_idx):
         """Update function for animation"""
@@ -228,31 +230,50 @@ def create_flow_animation(
         
         # Clear axes
         for ax in axes:
-            ax.clear()
+            for a in ax:
+                a.clear()
         
         # Input events - visualize by polarity (red=positive, blue=negative)
         event_rgb = visualize_events(input_events)
-        axes[0].imshow(event_rgb)
-        axes[0].set_title(f'Events (Frame {metadata["index"]:03d})')
-        axes[0].axis('off')
+        axes[0, 0].imshow(event_rgb)
+        axes[0, 0].set_title(f'Events (Frame {metadata["index"]:03d})')
+        axes[0, 0].axis('off')
         
         # Ground truth
         flow_gt_color = flow_to_color(flow_gt, max_flow)
-        axes[1].imshow(flow_gt_color)
-        axes[1].set_title('Ground Truth')
-        axes[1].axis('off')
+        axes[0, 1].imshow(flow_gt_color)
+        axes[0, 1].set_title('Ground Truth')
+        axes[0, 1].axis('off')
         
         # Prediction
         flow_pred_color = flow_to_color(flow_pred, max_flow)
-        axes[2].imshow(flow_pred_color)
-        axes[2].set_title(f'Prediction (EPE: {metrics["epe"]:.3f})')
-        axes[2].axis('off')
+        axes[0, 2].imshow(flow_pred_color)
+        axes[0, 2].set_title(f'Prediction (EPE: {metrics["epe"]:.3f})')
+        axes[0, 2].axis('off')
+
+        # Masked by input events
+        
+        # Ground truth
+        input_mask = input_events.sum(axis=0) > 0  
+
+        flow_gt_masked = flow_gt * input_mask
+        flow_gt_color = flow_to_color(flow_gt_masked, max_flow)
+        axes[1, 1].imshow(flow_gt_color)
+        axes[1, 1].set_title('Ground Truth')
+        axes[1, 1].axis('off')
+        
+        # Prediction
+        flow_pred_masked = flow_pred * input_mask
+        flow_pred_color = flow_to_color(flow_pred_masked, max_flow)
+        axes[1, 2].imshow(flow_pred_color)
+        axes[1, 2].set_title(f'Prediction (EPE: {metrics["masked_epe"]:.3f})')
+        axes[1, 2].axis('off')
         
         # Update title
         if sequence_name:
-            title = f'{sequence_name} - Frame {metadata["index"]:03d}/{len(indices)-1:03d}\nEPE: {metrics["epe"]:.3f}'
+            title = f'{sequence_name} - Frame {metadata["index"]:03d}/{len(indices)-1:03d}\nEPE: {metrics["epe"]:.3f}, Masked EPE: {metrics["masked_epe"]:.3f}'
         else:
-            title = f'{metadata["sequence"]} - Frame {metadata["index"]:03d}\nEPE: {metrics["epe"]:.3f}'
+            title = f'{metadata["sequence"]} - Frame {metadata["index"]:03d}\nEPE: {metrics["epe"]:.3f}, Masked EPE: {metrics["masked_epe"]:.3f}'
         
         fig.suptitle(title, fontsize=12, fontweight='bold')
         

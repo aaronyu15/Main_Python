@@ -10,6 +10,10 @@ from traitlets import Bool
 
 def epe (pred_flow: torch.Tensor, gt_flow: torch.Tensor) -> torch.Tensor:
     # [B, 2, H, W] -> [B, 1, H, W]
+    return torch.norm(pred_flow - gt_flow, p=2, dim=1, keepdim=True)
+
+def log_epe (pred_flow: torch.Tensor, gt_flow: torch.Tensor) -> torch.Tensor:
+    # [B, 2, H, W] -> [B, 1, H, W]
     return torch.log1p(torch.norm(pred_flow - gt_flow, p=2, dim=1, keepdim=True))
 
 def apply_mask(flow: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -25,8 +29,11 @@ def apply_mask(flow: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch
 
 
 def endpoint_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor, 
-                   mask: Optional[torch.Tensor] = None, return_vec: bool = False) -> torch.Tensor:
-    error = epe(pred_flow, gt_flow)
+                   mask: Optional[torch.Tensor] = None, return_vec: bool = False, proc="log") -> torch.Tensor:
+    if proc == "log":
+        error = log_epe(pred_flow, gt_flow)
+    elif proc == "epe":
+        error = epe(pred_flow, gt_flow)
 
     error, mask = apply_mask(error, mask)
     
@@ -38,7 +45,7 @@ def endpoint_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
 def effective_epe(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
                   mask: Optional[torch.Tensor] = None,
                   threshold_min: float = 0.1,
-                  threshold_max: Optional[float] = None) -> float:
+                  threshold_max: Optional[float] = None, proc="log") -> float:
 
     pred_mag = torch.sqrt(torch.sum(pred_flow ** 2, dim=1, keepdim=True))
     gt_mag = torch.sqrt(torch.sum(gt_flow ** 2, dim=1, keepdim=True))
@@ -49,7 +56,7 @@ def effective_epe(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
     
     mask = mask * effective_mask
     
-    return endpoint_error(pred_flow, gt_flow, mask)
+    return endpoint_error(pred_flow, gt_flow, mask, proc=proc)
   
 
 def angular_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
@@ -79,15 +86,15 @@ def angular_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
         return ang.sum() / (mask.sum() + 1e-8)
 
 def epe_weighted_angular_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor, inputs: torch.Tensor,
-                              mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+                              mask: Optional[torch.Tensor] = None, proc="log") -> torch.Tensor:
     """
     Compute angular error weighted by EPE magnitude and event activity.
     Regions with more events and larger errors contribute more to the loss.
     """
     ang_error, ang_mask = angular_error(pred_flow, gt_flow, mask, return_vec=True)
-    epe_error, epe_mask = endpoint_error(pred_flow, gt_flow, mask, return_vec=True)
+    epe_error, epe_mask = endpoint_error(pred_flow, gt_flow, mask, return_vec=True, proc=proc)
 
-    combined_mask = ang_mask * epe_mask
+    combined_mask = ang_mask * epe_mask 
     
     # Sum event activity over time and polarity bins to get [B, 1, H, W]
     event_activity = inputs.sum(dim=1).sum(dim=1, keepdim=True)  # [B, 1, H, W]
@@ -101,7 +108,7 @@ def epe_weighted_angular_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor, i
     event_weight = torch.log1p(event_weight * 10) / torch.log1p(torch.tensor(10.0))  # normalize log range to [0,1]
     
     # Combine weights: angular error * EPE error * event activity
-    weighted_ang_error = ang_error * epe_error * event_weight
+    weighted_ang_error = ang_error * epe_error * event_weight 
 
     # Normalize by sum of weights (not just mask count) to account for variable event activity
     total_weight = (event_weight * combined_mask).sum()
@@ -183,6 +190,7 @@ class CombinedLoss(nn.Module):
         vertical_weight: float = 0.0,
         null_pred_weight: float = 0.0,
         effective_epe_weights: Optional[list] = [0.0, 0.0, 0.0, 0.0, 0.0],
+        epe_type = "log",
     ):
         super().__init__()
         self.endpoint_weight = endpoint_weight
@@ -194,6 +202,8 @@ class CombinedLoss(nn.Module):
         self.null_pred_weight = null_pred_weight
 
         self.eff_endpoint_weight = effective_epe_weights 
+
+        self.epe_type = epe_type
 
     def forward(
         self,
@@ -216,18 +226,17 @@ class CombinedLoss(nn.Module):
         """
         losses = {}
         
-        losses['endpoint_loss'] = endpoint_error(outputs['flow'], gt_flow, mask)
+        losses['endpoint_loss'] = endpoint_error(outputs['flow'], gt_flow, mask, proc=self.epe_type)
         losses['angular_loss'] = angular_error(outputs['flow'], gt_flow, mask)
-        losses['epe_ang_loss'] = epe_weighted_angular_error(outputs['flow'], gt_flow, inputs, mask)
+        losses['epe_ang_loss'] = epe_weighted_angular_error(outputs['flow'], gt_flow, inputs, mask, proc=self.epe_type)
 
         losses['smoothness_loss'] = smoothness_loss(outputs['flow'], mask)
-        losses['vertical_loss'] = vertical_loss(outputs['flow'], gt_flow, mask)
         losses['null_pred_loss'] = null_prediction_loss(outputs['flow'], gt_flow, mask)
 
-        losses['endpoint_0p1_loss'] = effective_epe(outputs['flow'], gt_flow, mask, threshold_min=0.1, threshold_max=1.0)
-        losses['endpoint_1p0_loss'] = effective_epe(outputs['flow'], gt_flow, mask, threshold_min=1.0, threshold_max=5.0)
-        losses['endpoint_5p0_loss'] = effective_epe(outputs['flow'], gt_flow, mask, threshold_min=5.0, threshold_max=20.0)
-        losses['endpoint_20p0_loss'] =effective_epe(outputs['flow'], gt_flow, mask, threshold_min=20.0)
+        losses['endpoint_0p1_loss'] = effective_epe(outputs['flow'], gt_flow, mask, threshold_min=0.1, threshold_max=1.0, proc=self.epe_type)
+        losses['endpoint_1p0_loss'] = effective_epe(outputs['flow'], gt_flow, mask, threshold_min=1.0, threshold_max=5.0, proc=self.epe_type)
+        losses['endpoint_5p0_loss'] = effective_epe(outputs['flow'], gt_flow, mask, threshold_min=5.0, threshold_max=20.0, proc=self.epe_type)
+        losses['endpoint_20p0_loss'] =effective_epe(outputs['flow'], gt_flow, mask, threshold_min=20.0, proc=self.epe_type)
         
 
         losses['total_loss'] = (
@@ -235,7 +244,6 @@ class CombinedLoss(nn.Module):
             self.angular_weight * losses['angular_loss'] +
             self.epe_ang_weight * losses['epe_ang_loss'] +
             self.smoothness_weight * losses['smoothness_loss'] +
-            self.vertical_weight * losses['vertical_loss'] +
             self.null_pred_weight * losses['null_pred_loss'] +
             self.eff_endpoint_weight[0] * losses['endpoint_0p1_loss'] +
             self.eff_endpoint_weight[1] * losses['endpoint_1p0_loss'] +

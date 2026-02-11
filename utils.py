@@ -27,7 +27,7 @@ def get_model(config: dict) -> torch.nn.Module:
     return model
 
 
-def build_model(config: dict, device='cuda', train=True, checkpoint_path=None) -> torch.nn.Module:
+def build_model(config: dict, device='cuda', train=True, checkpoint_path=None, strict=False) -> torch.nn.Module:
     """Build model from configuration"""
     
     if train:
@@ -46,7 +46,7 @@ def build_model(config: dict, device='cuda', train=True, checkpoint_path=None) -
         model = get_model(config)
     
         # Load weights
-        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        model.load_state_dict(checkpoint['model_state_dict'], strict=strict)
         model = model.to(device)
         model.eval()
     

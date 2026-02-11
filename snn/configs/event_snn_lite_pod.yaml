@@ -48,6 +48,7 @@ epe_ang_weight: 0.01               # Disabled - was causing spatial bias
 smoothness_weight: 0.001            # Small smoothness regularization (now fixed)
 vertical_weight: 0.0              # Disabled unless needed
 effective_epe_weights: [0.2, 0.2, 0.1, 0.0, 0.0]  # Weights for effective EPE at different thresholds
+epe_type: 'epe'                      # Use logarithmic EPE for loss calculation
 
 # Data Settings
 data_root: '../train_set' # Path to dataset root directory

@@ -51,7 +51,8 @@ class SNNTrainer:
             smoothness_weight=config.get('smoothness_weight', 1.0),
             vertical_weight=config.get('vertical_weight', 1.0),
             null_pred_weight=0,
-            effective_epe_weights=config.get('effective_epe_weights', [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            effective_epe_weights=config.get('effective_epe_weights', [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            epe_type=config.get('epe_type', 'log')
         )
         
         lr = config.get('learning_rate', 1e-4)

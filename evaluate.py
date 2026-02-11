@@ -47,7 +47,8 @@ def evaluate(args):
     
 
     # Load model
-    model, config = build_model(None, device, train=False, checkpoint_path=args.checkpoint)
+    model, config = build_model(None, device, train=False, checkpoint_path=args.checkpoint, strict=True)
+    model.disable_skip = True
     
     # Build dataset
     dataset_config = config.copy()
@@ -83,10 +84,10 @@ def evaluate(args):
             
             # Compute metrics
             metrics = {}
-            metrics['epe'] = endpoint_error(pred_flow, gt_flow, valid_mask)
+            metrics['epe'] = endpoint_error(pred_flow, gt_flow, valid_mask, proc="epe")
             metrics['outliers'] = calculate_outliers(pred_flow, gt_flow, valid_mask, threshold=3.0)
             metrics['angular_error'] = angular_error(pred_flow, gt_flow, valid_mask)
-            metrics['epe_weighted_angular_error'] = epe_weighted_angular_error(pred_flow, gt_flow, inputs, valid_mask)
+            metrics['epe_weighted_angular_error'] = epe_weighted_angular_error(pred_flow, gt_flow, inputs, valid_mask, proc="epe")
             metrics['valid_pixels'] = valid_mask.sum().item()
 
             activity_patch = inputs.sum(dim=(1,2))
@@ -94,10 +95,10 @@ def evaluate(args):
             low_activity_mask = low_activity_mask.unsqueeze(1)
 
             valid_mask[low_activity_mask] = 0.0
-            metrics['epe_mask'] = endpoint_error(pred_flow, gt_flow, valid_mask)
+            metrics['epe_mask'] = endpoint_error(pred_flow, gt_flow, valid_mask, proc="epe")
             metrics['outliers_mask'] = calculate_outliers(pred_flow, gt_flow, valid_mask, threshold=3.0)
             metrics['angular_error_mask'] = angular_error(pred_flow, gt_flow, valid_mask)
-            metrics['epe_weighted_angular_error_mask'] = epe_weighted_angular_error(pred_flow, gt_flow, inputs, valid_mask)
+            metrics['epe_weighted_angular_error_mask'] = epe_weighted_angular_error(pred_flow, gt_flow, inputs, valid_mask, proc="epe")
             metrics['valid_pixels_mask'] = valid_mask.sum().item()
 
             metrics['sequence'] = metadata['sequence'][0]
