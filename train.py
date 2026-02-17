@@ -27,25 +27,27 @@ def parse_args():
                       help='Directory for logs')
     parser.add_argument('--seed', type=int, default=42,
                       help='Directory for logs')
+    parser.add_argument('--train-data-root', type=str, default=None,
+                      help='Override training dataset root (config fallback: data_root)')
+    parser.add_argument('--val-data-root', type=str, default=None,
+                      help='Validation dataset root (config fallback: val_data_root)')
     
     return parser.parse_args()
 
 
-def build_dataloaders(config: dict, data_root: str = None):
-    if data_root is None:
-        data_root = config.get('data_root', '../blink_sim/output')
-    
-    # Create config copy with data_root override if provided
-    dataset_config = config.copy()
-    dataset_config['data_root'] = data_root
-    
-    train_dataset = OpticalFlowDataset(config=dataset_config)
-    
-    train_size = int(0.9 * len(train_dataset))
-    val_size = len(train_dataset) - train_size
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        train_dataset, [train_size, val_size]
-    )
+def build_dataloaders(config: dict, train_root: str = None, val_root: str = None):
+    train_root = train_root or config.get('data_root', '../blink_sim/output/train_set')
+    val_root = val_root or config.get('val_data_root', '../blink_sim/output/valid_set')
+
+    # Train dataset
+    train_config = config.copy()
+    train_config['data_root'] = train_root
+    train_dataset = OpticalFlowDataset(config=train_config)
+
+    # Val dataset
+    val_config = config.copy()
+    val_config['data_root'] = val_root
+    val_dataset = OpticalFlowDataset(config=val_config)
     
     train_loader = DataLoader(
         train_dataset,
@@ -97,10 +99,12 @@ def main():
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Number of parameters: {num_params:,}")
     
-    data_root = config.get('data_root', None)
-    train_loader, val_loader = build_dataloaders(config, data_root)
+    train_root = args.train_data_root or config.get('data_root', None)
+    val_root = args.val_data_root or config.get('val_data_root', None)
+    train_loader, val_loader = build_dataloaders(config, train_root, val_root)
 
-    print(f"Data root: {data_root}")
+    print(f"Train data root: {train_root}")
+    print(f"Val data root: {val_root}")
     print(f"Train samples: {len(train_loader.dataset)}")
     print(f"Val samples: {len(val_loader.dataset)}")
     

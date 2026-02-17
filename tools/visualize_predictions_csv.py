@@ -189,7 +189,7 @@ def create_flow_animation_from_csv(
     
     
     # Create time windows
-    windows = create_time_windows(events, window_duration_us, window_duration_us)
+    windows = create_time_windows(events, window_duration_us)
     
     print(f"Processing {len(windows)} time windows...")
     
@@ -203,7 +203,8 @@ def create_flow_animation_from_csv(
         window_events = events[start_idx:end_idx]
         
         # Convert to voxel grid
-        voxel_grid = events_to_voxel_grid(window_events, num_bins, height, width)
+        voxel_grid = events_to_voxel_grid(window_events, num_bins, height, width, use_polarity)
+        #print(torch.max(voxel_grid))
         
         # Run inference
         flow_pred = run_inference(model, voxel_grid, device)
@@ -217,9 +218,25 @@ def create_flow_animation_from_csv(
         })
     
     print("Creating animation...")
-    
-    # Create animation
-    fig, axes = plt.subplots(1, 4, figsize=(15, 5))
+
+    # Precompute event counts for a static histogram view
+    event_counts = [f['num_events'] for f in frames_data]
+
+
+    # Save histogram separately to avoid slowing GIF rendering
+    hist_save_path = Path(save_path).with_name(Path(save_path).stem + '_events_hist.png')
+    plt.figure(figsize=(10, 3))
+    plt.bar(range(len(event_counts)), event_counts, color='gray', alpha=0.8)
+    plt.xlabel('Frame')
+    plt.ylabel('Event count')
+    plt.title('Events per Frame')
+    plt.tight_layout()
+    plt.savefig(hist_save_path, dpi=150)
+    plt.close()
+    print(f"Saved event count histogram to {hist_save_path}")
+
+    # Create animation layout: 1x4 main visuals (no histogram in GIF)
+    fig, axes = plt.subplots(1, 4, figsize=(15, 4))
     
     def update_frame(frame_idx):
         """Update function for animation"""
@@ -267,7 +284,7 @@ def create_flow_animation_from_csv(
         axes[3].set_ylim(h, 0)
         axes[3].set_facecolor('black')
         axes[3].axis('off')
-        
+
         # Update title
         title = (f'Frame {frame_idx+1}/{len(frames_data)} | '
                 f'Time: {frame_data["t_start_ms"]:.1f}-{frame_data["t_end_ms"]:.1f}ms | '
@@ -325,12 +342,7 @@ def main():
         default='../output/visualizations_csv',
         help='Directory to save visualizations'
     )
-    parser.add_argument(
-        '--num-bins',
-        type=int,
-        default=5,
-        help='Number of temporal bins for voxel grid (default: 5)'
-    )
+
 
     
     args = parser.parse_args()

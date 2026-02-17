@@ -65,6 +65,11 @@ class OpticalFlowDataset(Dataset):
         self.patch_size = config.get('patch_size', 64)
         self.activity_threshold = config.get('activity_threshold', 5)
 
+        # Probability to flip predominantly left-moving samples to right-moving
+        # (horizontal flip with u sign inversion). Set to 0.0 to disable.
+        self.flip_left_to_right_prob = config.get('flip_left_to_right_prob', 0.0)
+        self.flip_left_threshold = config.get('flip_left_threshold', -0.05)  # mean u below this triggers eligibility
+
         self.flow_clip_range = config.get('flow_clip_range', None)
         self.return_full_frame = config.get('return_full_frame', False)
 
@@ -185,6 +190,12 @@ class OpticalFlowDataset(Dataset):
             input_tensor, flow, valid_mask = self._apply_rotation_augmentation(
                 input_tensor, flow, valid_mask
             )
+
+        # Optionally flip predominantly left-moving samples to right-moving
+        if self.flip_left_to_right_prob > 0:
+            input_tensor, flow, valid_mask = self._maybe_flip_left_to_right(
+                input_tensor, flow, valid_mask
+            )
     
         # Extract single random patch from high-activity regions if in patch mode
         if self.patch_mode:
@@ -266,6 +277,32 @@ class OpticalFlowDataset(Dataset):
                     voxel_grid[bin_idx, pol_idx, y[i], x[i]] += 1.0
         
         return torch.from_numpy(voxel_grid)
+
+    def _maybe_flip_left_to_right(
+        self,
+        input_tensor: torch.Tensor,
+        flow: torch.Tensor,
+        valid_mask: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        If the sample is predominantly left-moving (negative mean u), randomly flip horizontally
+        to synthesize right-moving examples.
+        """
+        with torch.no_grad():
+            # Compute mean horizontal flow over valid pixels
+            denom = valid_mask.sum()
+            if denom <= 0:
+                return input_tensor, flow, valid_mask
+            mean_u = (flow[0] * valid_mask[0]).sum() / denom
+
+            if mean_u < self.flip_left_threshold:
+                if torch.rand(1).item() < self.flip_left_to_right_prob:
+                    # Flip spatial dim X (-1), invert horizontal flow
+                    input_tensor = torch.flip(input_tensor, dims=[-1])
+                    flow = torch.flip(flow, dims=[-1])
+                    flow[0] = -flow[0]
+                    valid_mask = torch.flip(valid_mask, dims=[-1])
+        return input_tensor, flow, valid_mask
     
     def _apply_rotation_augmentation(
         self,

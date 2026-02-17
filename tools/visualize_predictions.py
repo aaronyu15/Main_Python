@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import load_config, build_model
 from snn.dataset import OpticalFlowDataset
 from snn.utils import flow_to_color, visualize_events
+from snn.training import endpoint_error, angular_error
 
 
 def get_sequences(dataset: OpticalFlowDataset) -> Dict[str, list]:
@@ -48,17 +49,32 @@ def run_inference(
     flow_gt = sample['flow']
     
     output = model(input_tensor)
+    print(torch.max(input_tensor))
     
     flow_pred = output['flow'].squeeze(0).cpu()
+
+    event_mask = (input_tensor.cpu().sum(dim=1).squeeze(0) > 0).unsqueeze(0).unsqueeze(0)
     
     epe = torch.norm(flow_pred - flow_gt, p=2, dim=0).mean()
-    masked_epe = torch.norm((flow_pred - flow_gt) * (input_tensor.cpu().sum(dim=1).squeeze(0) > 0), p=2, dim=0).mean()
+    masked_epe = torch.norm((flow_pred - flow_gt) * event_mask.squeeze(0).squeeze(0), p=2, dim=0).mean()
+
+    # Directional metrics
+    flow_pred_b = flow_pred.unsqueeze(0)
+    flow_gt_b = flow_gt.unsqueeze(0)
+    dir_epe = endpoint_error(flow_pred_b, flow_gt_b, mode="directional", proc="epe")
+    dir_epe_mask = endpoint_error(flow_pred_b, flow_gt_b, mask=event_mask, mode="directional", proc="epe")
+    dir_ang = angular_error(flow_pred_b, flow_gt_b, mode="directional")
+    dir_ang_mask = angular_error(flow_pred_b, flow_gt_b, mask=event_mask, mode="directional")
     
     metrics = {
         'epe': epe.item(),
         'masked_epe': masked_epe.item(),
         'max_flow_gt': torch.norm(flow_gt, p=2, dim=0).max().item(),
         'max_flow_pred': torch.norm(flow_pred, p=2, dim=0).max().item(),
+        'dir_epe': {k: v.item() if torch.is_tensor(v) else float(v) for k, v in dir_epe.items()},
+        'dir_epe_masked': {k: v.item() if torch.is_tensor(v) else float(v) for k, v in dir_epe_mask.items()},
+        'dir_ang': {k: v.item() if torch.is_tensor(v) else float(v) for k, v in dir_ang.items()},
+        'dir_ang_masked': {k: v.item() if torch.is_tensor(v) else float(v) for k, v in dir_ang_mask.items()},
     }
     
     return flow_pred, metrics
@@ -206,6 +222,19 @@ def create_flow_animation(
         sequence_name: Optional sequence name to display in title
     """
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+
+    # Precompute event counts and save histogram separately to avoid slowing GIF
+    event_counts = [dataset[idx]['input'].sum().item() for idx in indices]
+    hist_save_path = Path(save_path).with_name(Path(save_path).stem + '_events_hist.png')
+    plt.figure(figsize=(10, 3))
+    plt.bar(range(len(event_counts)), event_counts, color='gray', alpha=0.8)
+    plt.xlabel('Frame')
+    plt.ylabel('Event count')
+    plt.title('Events per Frame')
+    plt.tight_layout()
+    plt.savefig(hist_save_path, dpi=150)
+    plt.close()
+    print(f"Saved event count histogram to {hist_save_path}")
     
     def update_frame(frame_idx):
         """Update function for animation"""
@@ -251,7 +280,9 @@ def create_flow_animation(
         axes[0, 2].set_title(f'Prediction (EPE: {metrics["epe"]:.3f})')
         axes[0, 2].axis('off')
 
-        # Masked by input events
+        # Masked by input events (placeholder axis now that histogram is separate)
+        axes[1, 0].clear()
+        axes[1, 0].axis('off')
         
         # Ground truth
         input_mask = input_events.sum(axis=0) > 0  
@@ -428,6 +459,10 @@ def main():
             print(f"  EPE: {metrics['epe']:.4f}")
             print(f"  Max Flow GT: {metrics['max_flow_gt']:.2f}")
             print(f"  Max Flow Pred: {metrics['max_flow_pred']:.2f}")
+            print(f"  Directional EPE: {metrics['dir_epe']}")
+            print(f"  Directional EPE (masked): {metrics['dir_epe_masked']}")
+            print(f"  Directional Angular Error: {metrics['dir_ang']}")
+            print(f"  Directional Angular Error (masked): {metrics['dir_ang_masked']}")
 
             # Visualize
             save_path = output_dir / f"sample_{dataset_idx:04d}.png"

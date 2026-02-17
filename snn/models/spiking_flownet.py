@@ -165,6 +165,7 @@ class EventSNNFlowNetLite(nn.Module):
 
         for t in range(T):
             xt = x[:, t]  # [N,2,H,W]
+            xt = torch.clamp(xt, 0, 15)  
 
             s1, mem_e1 = self.e1(xt, mem_e1)  # [N, base,   H/2, W/2]
             s2, mem_e2 = self.e2(s1, mem_e2)  # [N, 2base,  H/4, W/4]

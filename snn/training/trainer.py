@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 
 from ..utils.logger import Logger
 from ..utils.visualization import visualize_flow
-from .losses import CombinedLoss, effective_epe, calculate_outliers
+from .losses import CombinedLoss, effective_epe, calculate_outliers, endpoint_error, angular_error
 
 class SNNTrainer:
     def __init__(
@@ -52,7 +52,8 @@ class SNNTrainer:
             vertical_weight=config.get('vertical_weight', 1.0),
             null_pred_weight=0,
             effective_epe_weights=config.get('effective_epe_weights', [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
-            epe_type=config.get('epe_type', 'log')
+            epe_type=config.get('epe_type', 'log'),
+            directional_balance_weight=config.get('directional_balance_weight', 0.0),
         )
         
         lr = config.get('learning_rate', 1e-4)
@@ -109,36 +110,47 @@ class SNNTrainer:
         max_flow = min(torch.norm(gt_flow, dim=1).max().item(), 1.0)
         # Visualize GT flow using Middlebury color scheme
         gt_flow_vis = []
+        gt_flow_mask_vis = []
+
         for i in range(batch_size):
             flow_np = gt_flow[i].cpu()  # [2, H, W]
-            # Use visualize_flow which returns [H, W, 3] in range [0, 255]
-            flow_color = visualize_flow(flow_np, max_flow=max_flow)
-            # Convert to torch tensor [3, H, W] in range [0, 1]
-            flow_color = torch.from_numpy(flow_color).permute(2, 0, 1).float() / 255.0
-            gt_flow_vis.append(flow_color)
-        visualizations['gt_flow'] = torch.stack(gt_flow_vis)  # [B, 3, H, W]
 
-        # Visualize GT flow using Middlebury color scheme
-        gt_flow_mask_vis = []
-        for i in range(batch_size):
-            flow = gt_flow[i] * valid_mask[i]  # Mask out invalid pixels
-            flow_np = flow.cpu()  # [2, H, W]
-            # Use visualize_flow which returns [H, W, 3] in range [0, 255]
+            flow_mask = gt_flow[i] * valid_mask[i]  # Mask out invalid pixels
+            flow_np_mask = flow_mask.cpu()  # [2, H, W]
+
             flow_color = visualize_flow(flow_np, max_flow=max_flow)
-            # Convert to torch tensor [3, H, W] in range [0, 1]
+            flow_color_mask = visualize_flow(flow_np_mask, max_flow=max_flow)
+
             flow_color = torch.from_numpy(flow_color).permute(2, 0, 1).float() / 255.0
-            gt_flow_mask_vis.append(flow_color)
+            flow_color_mask = torch.from_numpy(flow_color_mask).permute(2, 0, 1).float() / 255.0
+
+            gt_flow_vis.append(flow_color)
+            gt_flow_mask_vis.append(flow_color_mask)
+
+        visualizations['gt_flow'] = torch.stack(gt_flow_vis)  # [B, 3, H, W]
         visualizations['gt_flow_masked'] = torch.stack(gt_flow_mask_vis)  # [B, 3, H, W]
         
         # Visualize predicted flow if provided
         if pred_flow is not None:
             pred_flow_vis = []
+            pred_flow_mask_vis = []
             for i in range(batch_size):
                 flow_np = pred_flow[i].cpu()  # [2, H, W]
+
+                flow_mask = pred_flow[i] * valid_mask[i]  # Mask out invalid pixels
+                flow_np_mask = flow_mask.cpu()  # [2, H, W]
+
                 flow_color = visualize_flow(flow_np, max_flow=max_flow)
+                flow_color_mask = visualize_flow(flow_np_mask, max_flow=max_flow)
+
                 flow_color = torch.from_numpy(flow_color).permute(2, 0, 1).float() / 255.0
+                flow_color_mask = torch.from_numpy(flow_color_mask).permute(2, 0, 1).float() / 255.0
+
                 pred_flow_vis.append(flow_color)
+                pred_flow_mask_vis.append(flow_color_mask)
+
             visualizations['pred_flow'] = torch.stack(pred_flow_vis)  # [B, 3, H, W]
+            visualizations['pred_flow_masked'] = torch.stack(pred_flow_mask_vis)  # [B, 3, H, W]
         
         return visualizations
         
@@ -192,6 +204,7 @@ class SNNTrainer:
             axes[0].set_title(f'U Component Distribution\nMin: {u_valid.min():.2f}, Max: {u_valid.max():.2f}, Mean: {u_valid.mean():.2f}')
             axes[0].grid(True, alpha=0.3)
             axes[0].set_xlim(min_val, max_val)
+            axes[0].set_yscale('log')  # Use log scale for better visibility of distribution tails
             
             # V component histogram
             axes[1].hist(v_valid.detach().numpy(), bins=50, range=(min_val, max_val),
@@ -201,6 +214,7 @@ class SNNTrainer:
             axes[1].set_title(f'V Component Distribution\nMin: {v_valid.min():.2f}, Max: {v_valid.max():.2f}, Mean: {v_valid.mean():.2f}')
             axes[1].grid(True, alpha=0.3)
             axes[1].set_xlim(min_val, max_val)
+            axes[1].set_yscale('log')  # Use log scale for better visibility of distribution tails
             
             plt.tight_layout()
             
@@ -231,10 +245,13 @@ class SNNTrainer:
             'endpoint_loss': 0.0,
             'angular_loss': 0.0,
             'epe_ang_loss': 0.0,
+            'dir_balance_loss': 0.0,
         }
         epoch_outliers = 0.0
         epoch_flow_max = 0.0
         epoch_flow_avg = 0.0
+        epoch_dir_epe = {d: 0.0 for d in ['left', 'right', 'up', 'down']}
+        epoch_dir_ang = {d: 0.0 for d in ['left', 'right', 'up', 'down']}
         num_batches = 0
         
         pbar = tqdm(self.train_loader, desc=f"Epoch {self.epoch}")
@@ -271,12 +288,18 @@ class SNNTrainer:
                 flow_mag = torch.norm(flow_pred, dim=1)
                 flow_max = flow_mag.max().item()
                 flow_avg = flow_mag.abs().mean().item()
+
+                dir_epe = endpoint_error(flow_pred, gt_flow, valid_mask, proc="epe", mode="directional")
+                dir_ang = angular_error(flow_pred, gt_flow, valid_mask, mode="directional")
             
             for key in epoch_losses:
                 epoch_losses[key] += losses[key]
             epoch_outliers += outliers            
             epoch_flow_max += flow_max
             epoch_flow_avg += flow_avg
+            for d in epoch_dir_epe.keys():
+                epoch_dir_epe[d] += float(dir_epe[d])
+                epoch_dir_ang[d] += float(dir_ang[d])
             num_batches += 1
 
             
@@ -300,6 +323,10 @@ class SNNTrainer:
                 
                 self.logger.log_scalar('train/flow_max', flow_max, self.global_step)
                 self.logger.log_scalar('train/flow_avg', flow_avg, self.global_step)
+
+                for d in ['left', 'right', 'up', 'down']:
+                    self.logger.log_scalar(f'train/dir_epe_{d}', float(dir_epe[d]), self.global_step)
+                    self.logger.log_scalar(f'train/dir_ang_{d}', float(dir_ang[d]), self.global_step)
             
             # Log images at specified interval (less frequent than scalars)
             if self.global_step % self.config.get('image_log_interval', 100) == 0:
@@ -334,12 +361,17 @@ class SNNTrainer:
         epoch_outliers /= num_batches
         epoch_flow_max /= num_batches
         epoch_flow_avg /= num_batches
+        for d in epoch_dir_epe.keys():
+            epoch_dir_epe[d] /= num_batches
+            epoch_dir_ang[d] /= num_batches
         
         return {
             **epoch_losses,
             'outliers': epoch_outliers,
             'flow_max': epoch_flow_max,
-            'flow_avg': epoch_flow_avg
+            'flow_avg': epoch_flow_avg,
+            **{f'dir_epe_{d}': epoch_dir_epe[d] for d in epoch_dir_epe},
+            **{f'dir_ang_{d}': epoch_dir_ang[d] for d in epoch_dir_ang},
         }
     
     @torch.no_grad()
@@ -352,11 +384,14 @@ class SNNTrainer:
             'endpoint_loss': 0.0,
             'angular_loss': 0.0,
             'epe_ang_loss': 0.0,
+            'dir_balance_loss': 0.0,
         }
         val_epe_effective = 0.0
         val_outliers = 0.0
         val_flow_max = 0.0
         val_flow_avg = 0.0
+        val_dir_epe = {d: 0.0 for d in ['left', 'right', 'up', 'down']}
+        val_dir_ang = {d: 0.0 for d in ['left', 'right', 'up', 'down']}
         num_batches = 0
         
         # Store first batch for visualization
@@ -391,6 +426,9 @@ class SNNTrainer:
             flow_mag = torch.norm(flow_pred, dim=1)
             flow_max = flow_mag.max().item()
             flow_avg = flow_mag.abs().mean().item()
+
+            dir_epe = endpoint_error(flow_pred, gt_flow, valid_mask, proc="epe", mode="directional")
+            dir_ang = angular_error(flow_pred, gt_flow, valid_mask, mode="directional")
             
             for key in val_losses:
                 val_losses[key] += losses[key]
@@ -400,6 +438,9 @@ class SNNTrainer:
 
             val_flow_max += flow_max
             val_flow_avg += flow_avg
+            for d in val_dir_epe.keys():
+                val_dir_epe[d] += float(dir_epe[d])
+                val_dir_ang[d] += float(dir_ang[d])
 
             num_batches += 1
             
@@ -419,6 +460,9 @@ class SNNTrainer:
         val_outliers /= num_batches
         val_flow_max /= num_batches
         val_flow_avg /= num_batches
+        for d in val_dir_epe.keys():
+            val_dir_epe[d] /= num_batches
+            val_dir_ang[d] /= num_batches
         
         # Log validation images
         if first_batch_vis is not None:
@@ -454,7 +498,9 @@ class SNNTrainer:
             'epe_effective': val_epe_effective,
             'outliers': val_outliers,
             'flow_max': val_flow_max,
-            'flow_avg': val_flow_avg
+            'flow_avg': val_flow_avg,
+            **{f'dir_epe_{d}': val_dir_epe[d] for d in val_dir_epe},
+            **{f'dir_ang_{d}': val_dir_ang[d] for d in val_dir_ang},
         }
     
     
@@ -522,7 +568,7 @@ class SNNTrainer:
         print(f"Starting training from epoch {self.epoch}")
         print(f"Configuration: {json.dumps(self.config, indent=2)}")
         
-        start_epoch = self.epoch
+        start_epoch = self.epoch + 1
 
         for epoch in range(start_epoch, num_epochs+1):
             self.epoch = epoch

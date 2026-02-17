@@ -29,18 +29,47 @@ def apply_mask(flow: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch
 
 
 def endpoint_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor, 
-                   mask: Optional[torch.Tensor] = None, return_vec: bool = False, proc="log") -> torch.Tensor:
-    if proc == "log":
-        error = log_epe(pred_flow, gt_flow)
-    elif proc == "epe":
-        error = epe(pred_flow, gt_flow)
+                   mask: Optional[torch.Tensor] = None, return_vec: bool = False, proc="log", mode="gen") -> torch.Tensor:
+    if mode == "gen":
+        if proc == "log":
+            error = log_epe(pred_flow, gt_flow)
+        elif proc == "epe":
+            error = epe(pred_flow, gt_flow)
 
-    error, mask = apply_mask(error, mask)
+        error, mask = apply_mask(error, mask)
     
-    if return_vec:
-        return error, mask
-    else:
-        return error.sum() / (mask.sum() + 1e-8)
+        if return_vec:
+            return error, mask
+        else:
+            return error.sum() / (mask.sum() + 1e-8)
+
+    elif mode == "directional":
+        # Compute per-pixel EPE then aggregate by GT direction quadrants (90° FOV)
+        if proc == "log":
+            error_map = log_epe(pred_flow, gt_flow)  # [B,1,H,W]
+        else:
+            error_map = epe(pred_flow, gt_flow)      # [B,1,H,W]
+
+        base_mask = mask if mask is not None else torch.ones_like(error_map)
+
+        gt_u, gt_v = gt_flow[:, 0], gt_flow[:, 1]
+        ang_deg = torch.atan2(gt_v, gt_u) * 180.0 / np.pi
+        ang_deg = (ang_deg + 360.0) % 360.0  # [0, 360)
+
+        dir_masks = {
+            "right": ((ang_deg >= 315.0) | (ang_deg < 45.0)).unsqueeze(1).float(),
+            "up":    ((ang_deg >= 45.0)  & (ang_deg < 135.0)).unsqueeze(1).float(),
+            "left":  ((ang_deg >= 135.0) & (ang_deg < 225.0)).unsqueeze(1).float(),
+            "down":  ((ang_deg >= 225.0) & (ang_deg < 315.0)).unsqueeze(1).float(),
+        }
+
+        errors = {}
+        for name, dir_mask in dir_masks.items():
+            combined_mask = dir_mask * base_mask
+            errors[name] = (error_map * combined_mask).sum() / (combined_mask.sum() + 1e-8)
+
+        return errors
+
 
 def effective_epe(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
                   mask: Optional[torch.Tensor] = None,
@@ -60,7 +89,7 @@ def effective_epe(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
   
 
 def angular_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
-                  mask: Optional[torch.Tensor] = None, return_vec: bool = False) -> torch.Tensor:
+                  mask: Optional[torch.Tensor] = None, return_vec: bool = False, mode: str = "gen") -> torch.Tensor:
     # Extract u and v components
     pu, pv = pred_flow[:, 0], pred_flow[:, 1]
     gu, gv = gt_flow[:, 0], gt_flow[:, 1]
@@ -78,12 +107,36 @@ def angular_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor,
     ang = torch.acos(cos) * 180.0 / np.pi  # degrees
     ang = ang.unsqueeze(1)  # [B, 1, H, W]
 
-    ang, mask = apply_mask(ang, mask)
+    nonzero_mask = (gt_flow.norm(dim=1) > 0.1).float().unsqueeze(1)  # [B, 1, H, W]
+    if mode == "gen":
+        mask = nonzero_mask if mask is None else (mask * nonzero_mask)
+        ang, mask = apply_mask(ang, mask)
 
-    if return_vec:
-        return ang, mask
-    else:
+        if return_vec:
+            return ang, mask
         return ang.sum() / (mask.sum() + 1e-8)
+
+    elif mode == "directional":
+        base_mask = mask if mask is not None else torch.ones_like(ang)
+
+        ang_deg = torch.atan2(gv, gu) * 180.0 / np.pi
+        ang_deg = (ang_deg + 360.0) % 360.0
+
+        dir_masks = {
+            "right": ((ang_deg >= 315.0) | (ang_deg < 45.0)).unsqueeze(1).float() * nonzero_mask,
+            "up":    ((ang_deg >= 45.0)  & (ang_deg < 135.0)).unsqueeze(1).float() * nonzero_mask,
+            "left":  ((ang_deg >= 135.0) & (ang_deg < 225.0)).unsqueeze(1).float() * nonzero_mask,
+            "down":  ((ang_deg >= 225.0) & (ang_deg < 315.0)).unsqueeze(1).float() * nonzero_mask,
+        }
+
+        errors = {}
+        for name, dir_mask in dir_masks.items():
+            combined_mask = dir_mask * base_mask
+            errors[name] = (ang * combined_mask).sum() / (combined_mask.sum() + 1e-8)
+
+        if return_vec:
+            return errors, dir_masks
+        return errors
 
 def epe_weighted_angular_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor, inputs: torch.Tensor,
                               mask: Optional[torch.Tensor] = None, proc="log") -> torch.Tensor:
@@ -103,9 +156,6 @@ def epe_weighted_angular_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor, i
     # This ensures samples with different overall event counts are treated fairly
     max_activity = event_activity.view(event_activity.shape[0], -1).max(dim=1)[0].view(-1, 1, 1, 1)
     event_weight = event_activity / (max_activity + 1e-8)
-    
-    # Apply log scaling for smoother weighting (optional, can be removed if too aggressive)
-    event_weight = torch.log1p(event_weight * 10) / torch.log1p(torch.tensor(10.0))  # normalize log range to [0,1]
     
     # Combine weights: angular error * EPE error * event activity
     weighted_ang_error = ang_error * epe_error * event_weight 
@@ -191,6 +241,7 @@ class CombinedLoss(nn.Module):
         null_pred_weight: float = 0.0,
         effective_epe_weights: Optional[list] = [0.0, 0.0, 0.0, 0.0, 0.0],
         epe_type = "log",
+        directional_balance_weight: float = 0.0,
     ):
         super().__init__()
         self.endpoint_weight = endpoint_weight
@@ -204,6 +255,9 @@ class CombinedLoss(nn.Module):
         self.eff_endpoint_weight = effective_epe_weights 
 
         self.epe_type = epe_type
+
+        # Directional balance regularizer (variance of directional angular errors)
+        self.directional_balance_weight = directional_balance_weight
 
     def forward(
         self,
@@ -237,6 +291,32 @@ class CombinedLoss(nn.Module):
         losses['endpoint_1p0_loss'] = effective_epe(outputs['flow'], gt_flow, mask, threshold_min=1.0, threshold_max=5.0, proc=self.epe_type)
         losses['endpoint_5p0_loss'] = effective_epe(outputs['flow'], gt_flow, mask, threshold_min=5.0, threshold_max=20.0, proc=self.epe_type)
         losses['endpoint_20p0_loss'] =effective_epe(outputs['flow'], gt_flow, mask, threshold_min=20.0, proc=self.epe_type)
+
+        # Directional balance on angular error (variance across quadrants)
+        if self.directional_balance_weight > 0.0:
+            dir_ang = angular_error(
+                outputs['flow'],
+                gt_flow,
+                mask,
+                mode="directional"
+            )
+
+            # Compute variance separately for horizontal (L/R) and vertical (U/D), then average
+            ang_left = dir_ang['left'] if torch.is_tensor(dir_ang['left']) else torch.tensor(dir_ang['left'], device=gt_flow.device)
+            ang_right = dir_ang['right'] if torch.is_tensor(dir_ang['right']) else torch.tensor(dir_ang['right'], device=gt_flow.device)
+            ang_up = dir_ang['up'] if torch.is_tensor(dir_ang['up']) else torch.tensor(dir_ang['up'], device=gt_flow.device)
+            ang_down = dir_ang['down'] if torch.is_tensor(dir_ang['down']) else torch.tensor(dir_ang['down'], device=gt_flow.device)
+
+            horiz = torch.stack([ang_left, ang_right])
+            vert = torch.stack([ang_up, ang_down])
+
+            var_horiz = ((horiz - horiz.mean()) ** 2).mean()
+            var_vert = ((vert - vert.mean()) ** 2).mean()
+
+            dir_balance = 0.5 * (var_horiz + var_vert)
+            losses['dir_balance_loss'] = dir_balance * self.directional_balance_weight
+        else:
+            losses['dir_balance_loss'] = torch.tensor(0.0, device=gt_flow.device)
         
 
         losses['total_loss'] = (
@@ -248,7 +328,8 @@ class CombinedLoss(nn.Module):
             self.eff_endpoint_weight[0] * losses['endpoint_0p1_loss'] +
             self.eff_endpoint_weight[1] * losses['endpoint_1p0_loss'] +
             self.eff_endpoint_weight[2] * losses['endpoint_5p0_loss'] +
-            self.eff_endpoint_weight[3] * losses['endpoint_20p0_loss'] 
+            self.eff_endpoint_weight[3] * losses['endpoint_20p0_loss'] +
+            losses['dir_balance_loss']
         )
         
         return losses
