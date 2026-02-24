@@ -8,6 +8,7 @@ from snn.models import *
 
 models = {
     'EventSNNFlowNetLite': EventSNNFlowNetLite,
+    'EventSNNFlowNetTeacher': EventSNNFlowNetTeacher,
     'OtherModel': None,  
 }
 
@@ -55,3 +56,55 @@ def build_model(config: dict, device='cuda', train=True, checkpoint_path=None, s
         print(f"Best validation EPE: {checkpoint.get('best_val_epe', 'unknown')}")
     
         return model, config
+
+
+def load_teacher_model(checkpoint_path: str, device='cuda') -> torch.nn.Module:
+    """
+    Load a pre-trained teacher model from checkpoint for distillation.
+    
+    The teacher model is loaded using the config stored in the checkpoint,
+    ensuring compatibility even if the current model code has changed.
+    The model is set to eval mode and all parameters are frozen.
+    
+    Args:
+        checkpoint_path: Path to teacher checkpoint file
+        device: Device to load model on
+        
+    Returns:
+        Frozen teacher model in eval mode
+    """
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    # Get config from checkpoint
+    teacher_config = checkpoint.get('config', {})
+    
+    # Override model type to use Teacher class for versioning
+    original_model_type = teacher_config.get('model_type', 'EventSNNFlowNetLite')
+    
+    # Map old model types to teacher versions
+    teacher_model_map = {
+        'EventSNNFlowNetLite': 'EventSNNFlowNetTeacher',
+    }
+    
+    teacher_model_type = teacher_model_map.get(original_model_type, original_model_type)
+    teacher_config['model_type'] = teacher_model_type
+    
+    print(f"Loading teacher model: {original_model_type} -> {teacher_model_type}")
+    
+    # Build model
+    model = get_model(teacher_config)
+    
+    # Load weights
+    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    model = model.to(device)
+    
+    # Freeze model
+    model.eval()
+    for param in model.parameters():
+        param.requires_grad = False
+    
+    print(f"Loaded teacher model from {checkpoint_path}")
+    print(f"Teacher trained for {checkpoint.get('epoch', 'unknown')} epochs")
+    print(f"Teacher best validation EPE: {checkpoint.get('best_val_epe', 'unknown')}")
+    
+    return model

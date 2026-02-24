@@ -3,17 +3,18 @@
 
 # Model Configuration
 model_type: 'EventSNNFlowNetLite'   # Event-aware SNN architecture
+#model_type: 'EventSNNFlowNetTeacher'   # Event-aware SNN architecture
 use_polarity: false                # Use separate channels for event polarities
 num_bins: 5                       # Event temporal bins - controls temporal history length
 bin_interval_us: 5000
-base_ch: 4                        # Base number of channels in encoder
+base_ch: 4                       # Base number of channels in encoder
 
 enable_logging_params: false                    # Log model parameters and statistics to TensorBoard
 
 # Model layer setting
 conv_type: 'SpikingConvBlock'
 lif_type: 'QuantizedLIF'
-decay: 0.25                        # LIF neuron decay factor (0-1, smaller = faster decay)
+decay: 0.5                        # LIF neuron decay factor (0-1, smaller = faster decay)
 threshold: 1.0                      # LIF neuron firing threshold
 reset: 0.0
 alpha: 10.0                         # Surrogate gradient slope (higher = sharper)
@@ -29,8 +30,29 @@ weight_bit_width: 8
 act_bit_width: 8
 mem_bit_width: 8
 
+distillation:
+  enabled: false
+  # Alpha: Weight for distillation vs ground-truth loss
+  #   0.0 = Pure ground-truth training (no teacher)
+  #   0.5 = Balanced hybrid (recommended starting point)
+  #   1.0 = Pure distillation (student learns only from teacher)
+  alpha: 1.0
+  
+  # Temperature: Softens teacher outputs (higher = softer)
+  #   1.0 = No softening (direct matching)
+  #   > 1.0 = Softer targets (can help with hard-to-learn patterns)
+  temperature: 0.8
+  
+  # Loss type for comparing student and teacher outputs
+  #   'mse' = Mean squared error (default, good for regression)
+  #   'cosine' = Cosine similarity (focuses on flow direction)
+  #   'smooth_l1' = Huber loss (robust to outliers)
+  #   'epe' = Endpoint error (same as GT loss)
+  loss_type: 'cosine'
+
+
 # Training Settings
-num_epochs: 45                  # Faster training for prototyping
+num_epochs: 25                  # Faster training for prototyping
 batch_size: 4                      # Larger batch for small model
 val_batch_size: 4
 num_workers: 4                      # Use 0 to avoid multiprocessing with h5py
@@ -38,7 +60,7 @@ num_workers: 4                      # Use 0 to avoid multiprocessing with h5py
 # Optimizer Settings
 learning_rate: 0.0005              # Higher LR for faster convergence
 weight_decay: 0.01
-lr_milestones: [30]
+lr_milestones: [10]
 lr_gamma: 0.5
 
 # Loss Weights
