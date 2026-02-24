@@ -184,6 +184,7 @@ class QuantizedIF(nn.Module):
         self,
         config: Optional[dict] = None,
         layer_name: str = "if",
+        option: Optional[str] = None,
     ):
         super().__init__()
         self.threshold = config.get('threshold', 1.0)
@@ -193,15 +194,20 @@ class QuantizedIF(nn.Module):
         self.mem_bit_width = config.get('mem_bit_width', 16)
 
         self.mem = None
+        self.option = option
 
     def forward(self, x, mem) -> Any:
         if mem is None:
             mem = torch.zeros_like(x)
 
+        if self.option == "spike_no_membrane":
+            spk = SurrogateSpike.apply(x - self.threshold, self.alpha)
+            return spk, mem
+
         mem = mem + x
 
         spk = SurrogateSpike.apply(mem - self.threshold, self.alpha)
-        mem = mem * (self.threshold - spk) + self.reset * spk
+        mem = mem * (self.threshold - spk) 
     
         # Quantize membrane again after reset if enabled
         if self.quantize_mem:
@@ -214,6 +220,7 @@ class QuantizedLIF(nn.Module):
         self,
         config: Optional[dict] = None,
         layer_name: str = "lif",
+        option: Optional[str] = None,
     ):
         super().__init__()
         
@@ -225,16 +232,27 @@ class QuantizedLIF(nn.Module):
         self.mem_bit_width = config.get('mem_bit_width', 16)
 
         self.mem = None
+        self.option = option
 
     def forward(self, x, mem) -> Any:
+
+        if mem is None:
+            mem = torch.zeros_like(x)
+
+        if self.option == "spike_no_membrane":
+            spk = SurrogateSpike.apply(x - self.threshold, self.alpha)
+            return spk, mem
+
         if mem is None:
             mem = torch.zeros_like(x)
 
         decay_factor = torch.tensor(self.decay, device=x.device, dtype=x.dtype)
-        mem = mem * decay_factor + x
+        x_mask = (x.abs() > 1e-2).float()
+        decay = x_mask * decay_factor + (1 - x_mask) * 1.0
+        mem = mem * decay + x
 
         spk = SurrogateSpike.apply(mem - self.threshold, self.alpha)
-        mem = mem * (self.threshold - spk) + self.reset * spk
+        mem = mem * (self.threshold - spk) 
     
         # Quantize membrane again after reset if enabled
         if self.quantize_mem:

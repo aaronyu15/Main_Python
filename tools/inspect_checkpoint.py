@@ -237,8 +237,24 @@ def main() -> None:
         _calculate_membrane_sizes(ckpt, args.config, args.input_size)
 
 
+def _format_bytes(bytes_size: int) -> str:
+    """Format byte size into human-readable string."""
+    if bytes_size < 1024:
+        return f"{bytes_size} B"
+    elif bytes_size < 1024**2:
+        return f"{bytes_size/1024:.2f} KB"
+    elif bytes_size < 1024**3:
+        return f"{bytes_size/(1024**2):.2f} MB"
+    else:
+        return f"{bytes_size/(1024**3):.2f} GB"
+
+
 def _calculate_membrane_sizes(ckpt: Any, config_path: str, input_size_str: str) -> None:
-    """Calculate total size of membrane potentials by running a dummy forward pass."""
+    """Calculate total size of membrane potentials by running a dummy forward pass.
+    
+    This creates a fresh model instance (no checkpoint loading needed) and runs
+    a single forward pass to capture membrane tensor shapes from spiking layers.
+    """
     print("\n[membrane potential sizes]")
     
     try:
@@ -256,51 +272,48 @@ def _calculate_membrane_sizes(ckpt: Any, config_path: str, input_size_str: str) 
             print(f"- Error: Invalid input size format '{input_size_str}'. Expected 'H,W'.")
             return
         
-        # Build model
+        # Build model (fresh instance, no checkpoint needed for shape calculation)
         try:
             model = build_model(config)
-            
-            # Load checkpoint weights
-            if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
-                model.load_state_dict(ckpt['model_state_dict'])
-            elif isinstance(ckpt, dict) and 'state_dict' in ckpt:
-                model.load_state_dict(ckpt['state_dict'])
-            else:
-                print("- Warning: Could not find model_state_dict or state_dict in checkpoint")
-            
+            model.cpu()  # Ensure model is on CPU
             model.eval()
         except Exception as e:
             print(f"- Error building model: {e}")
             return
         
-        # Create dummy input
+        # Create dummy input on CPU
         num_bins = config.get('num_bins', 5)
         use_polarity = config.get('use_polarity', False)
         c = 2 if use_polarity else 1
         
-        dummy_input = torch.zeros(1, num_bins, c, h, w, device='cuda')
+        dummy_input = torch.zeros(1, num_bins, c, h, w)
         print(f"- input shape: [1, {num_bins}, {c}, {h}, {w}]")
         
-        # Hook to capture membrane states
+        # Hook to capture membrane states from spiking layers
         membrane_states = {}
         
         def capture_hook(name):
             def hook(module, input, output):
                 if isinstance(output, tuple) and len(output) == 2:
-                    # Output is (spikes, membrane)
+                    # Output is (spikes, membrane) for SpikingConvBlock
                     mem = output[1]
                     if mem is not None and isinstance(mem, torch.Tensor):
                         # Store shape without batch dimension
                         membrane_states[name] = tuple(mem.shape[1:])
             return hook
         
-        # Register hooks on encoder/decoder layers
+        # Register hooks only on modules that have a 'lif' attribute (spiking layers)
+        # This properly identifies SpikingConvBlock, BlockedSpikingConvBlock, etc.
         hooks = []
         for name, module in model.named_modules():
-            if any(x in name for x in ['e1', 'e2', 'e3', 'e4', 'd1', 'd2', 'd3', 'd4']):
-                if 'conv' in name or name in ['e1', 'e2', 'e3', 'e4', 'd1', 'd2', 'd3', 'd4']:
-                    hook = module.register_forward_hook(capture_hook(name))
-                    hooks.append(hook)
+            # Check if module has 'lif' attribute (spiking neuron layer)
+            if hasattr(module, 'lif'):
+                hook = module.register_forward_hook(capture_hook(name))
+                hooks.append(hook)
+        
+        if not hooks:
+            print("- No spiking layers found (no modules with 'lif' attribute)")
+            return
         
         # Run forward pass
         try:
@@ -308,6 +321,8 @@ def _calculate_membrane_sizes(ckpt: Any, config_path: str, input_size_str: str) 
                 _ = model(dummy_input)
         except Exception as e:
             print(f"- Error during forward pass: {e}")
+            import traceback
+            traceback.print_exc()
             for hook in hooks:
                 hook.remove()
             return
@@ -318,9 +333,8 @@ def _calculate_membrane_sizes(ckpt: Any, config_path: str, input_size_str: str) 
         
         # Calculate and display sizes
         if membrane_states:
-            print("\n- membrane states:")
+            print("\n- membrane states (per sample):")
             total_elements = 0
-            total_bytes = 0
             
             # Sort by layer name for consistent output
             for name in sorted(membrane_states.keys()):
@@ -329,34 +343,17 @@ def _calculate_membrane_sizes(ckpt: Any, config_path: str, input_size_str: str) 
                 for dim in shape:
                     elements *= dim
                 
-                # Assume float32 (4 bytes per element)
-                bytes_size = elements * 1
                 total_elements += elements
-                total_bytes += bytes_size
                 
-                # Format size nicely
-                if bytes_size < 1024:
-                    size_str = f"{bytes_size} B"
-                elif bytes_size < 1024**2:
-                    size_str = f"{bytes_size/1024:.2f} KB"
-                elif bytes_size < 1024**3:
-                    size_str = f"{bytes_size/(1024**2):.2f} MB"
-                else:
-                    size_str = f"{bytes_size/(1024**3):.2f} GB"
-                
-                print(f"  {name}: {shape} -> {elements:,} elements ({size_str})")
+                # Display with 1 byte per element (quantized) and 4 bytes (float32)
+                print(f"  {name}: shape={shape}, elements={elements:,}")
             
-            # Total summary
+            # Total summary with different precision options
             print(f"\n- total membrane elements: {total_elements:,}")
-            if total_bytes < 1024:
-                total_str = f"{total_bytes} B"
-            elif total_bytes < 1024**2:
-                total_str = f"{total_bytes/1024:.2f} KB"
-            elif total_bytes < 1024**3:
-                total_str = f"{total_bytes/(1024**2):.2f} MB"
-            else:
-                total_str = f"{total_bytes/(1024**3):.2f} GB"
-            print(f"- total membrane memory: {total_str}")
+            print(f"- memory per precision:")
+            print(f"    int8/uint8 (1 byte):  {_format_bytes(total_elements * 1)}")
+            print(f"    int16/fp16 (2 bytes): {_format_bytes(total_elements * 2)}")
+            print(f"    float32 (4 bytes):    {_format_bytes(total_elements * 4)}")
         else:
             print("- No membrane states captured (model may not have SNN layers)")
             
@@ -365,6 +362,8 @@ def _calculate_membrane_sizes(ckpt: Any, config_path: str, input_size_str: str) 
         print("- Make sure you run this from the project root directory")
     except Exception as e:
         print(f"- Error: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == "__main__":

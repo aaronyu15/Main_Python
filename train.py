@@ -77,12 +77,12 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
 
-    seed = args.seed
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if device == 'cuda':
-        torch.cuda.manual_seed_all(seed)
+    #seed = args.seed
+    #random.seed(seed)
+    #np.random.seed(seed)
+    #torch.manual_seed(seed)
+    #if device == 'cuda':
+    #    torch.cuda.manual_seed_all(seed)
     
     model = build_model(config, device=device, train=True)
     print(f"Built model: {config.get('model_type', 'SpikingFlowNet')}")

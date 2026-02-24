@@ -42,26 +42,27 @@ class EventSNNFlowNetLite(nn.Module):
             2 if self.use_polarity else 1,
             self.base_ch,
             k=3,
-            s=2,
+            s=1,
             p=1,
             config=config,
             weight_bit_width=self.input_bit_width,
             act_bit_width=self.input_bit_width,
             layer_name="e1",
+            option="spike_no_membrane"
         ) # -> 32x32
 
         self.e2 = conv_layer(
             self.base_ch, 
-            self.base_ch*2, 
+            self.base_ch, 
             k=3, 
-            s=2, 
+            s=1, 
             p=1, 
             config=config,
             layer_name="e2"
         ) # -> 16x16
 
         self.e3 = conv_layer(
-            self.base_ch*2, 
+            self.base_ch, 
             self.base_ch*2, 
             k=3, 
             s=1, 
@@ -93,7 +94,7 @@ class EventSNNFlowNetLite(nn.Module):
 
         self.d3 = conv_layer(
             self.base_ch*2,
-            self.base_ch*2,
+            self.base_ch,
             k=3,
             s=1,
             p=1,
@@ -103,7 +104,7 @@ class EventSNNFlowNetLite(nn.Module):
         ) # -> 32x32
 
         self.d2 = conv_layer(
-            self.base_ch*2,
+            self.base_ch,
             self.base_ch,
             k=3,
             s=1,
@@ -165,10 +166,14 @@ class EventSNNFlowNetLite(nn.Module):
 
         for t in range(T):
             xt = x[:, t]  # [N,2,H,W]
-            xt = torch.clamp(xt, 0, 15)  
+            xt = torch.clamp(xt, 0, 1)  
 
             s1, mem_e1 = self.e1(xt, mem_e1)  # [N, base,   H/2, W/2]
+            s1 = F.max_pool2d(s1, kernel_size=2)  # Downsample to H/4, W/4 for next layer
+
             s2, mem_e2 = self.e2(s1, mem_e2)  # [N, 2base,  H/4, W/4]
+            s2 = F.max_pool2d(s2, kernel_size=2)  # Downsample to H/8, W/8 for next layer
+
             s3, mem_e3 = self.e3(s2, mem_e3) 
             #s4, mem_e4 = self.e4(s3, mem_e4)  
 

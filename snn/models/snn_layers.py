@@ -22,6 +22,7 @@ class SpikingConvBlock(nn.Module):
         weight_bit_width=None,
         act_bit_width=None,
         layer_name=None,
+        option=None,
     ):
         super().__init__()
 
@@ -43,6 +44,7 @@ class SpikingConvBlock(nn.Module):
         self.lif = layer_params[config.get("lif_type", "QuantizedLIF")](
             config=config,
             layer_name=layer_name,
+            option=option,
         )
         
     def forward(self, x, mem):

@@ -54,6 +54,7 @@ def evaluate(args):
     dataset_config = config.copy()
     dataset_config['data_root'] = args.data_root
     dataset_config['max_train_samples'] = args.num_samples
+    dataset_config['flip_left_to_right_prob'] = 0.0
     
     dataset = OpticalFlowDataset(config=dataset_config)
     
