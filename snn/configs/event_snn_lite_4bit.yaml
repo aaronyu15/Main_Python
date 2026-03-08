@@ -1,54 +1,92 @@
 # EventSNNFlowNetLite - 4-bit Quantization Fine-tuning
 # Fine-tune from 8-bit checkpoint with 4-bit quantization
+# Based on event_snn_lite.yaml with quantization enabled
 
 # Model Configuration
 model_type: 'EventSNNFlowNetLite'
-in_channels: 2
-num_bins: 5
-num_timesteps: 5
-base_ch: 32
-decay: 0.5                            # LIF neuron time constant
-threshold: 16.0                      # LIF neuron firing threshold
-alpha: 10.0
+use_polarity: false                 # Use separate channels for event polarities
+num_bins: 5                         # Event temporal bins
+bin_interval_us: 5000
+base_ch: 8                          # Base number of channels in encoder
 
-# Quantization Settings - 4-bit QAT
+enable_logging_params: true         # Log model parameters and statistics to TensorBoard
+
+# Model layer setting
+conv_type: 'SpikingConvBlock'
+lif_type: 'QuantizedLIF'
+decay: 0.5                          # LIF neuron decay factor
+threshold: 1.0                      # LIF neuron firing threshold
+reset: 0.0
+alpha: 10.0                         # Surrogate gradient slope
+use_norm: false
+use_bias: false
+
+# Quantization Settings - 4-bit
 quantize_weights: true              # Enable weight quantization
 quantize_activations: true          # Enable activation quantization
-quantize_mem: true                  # Enable membrane potential quantization
+quantize_mem: true                  # Enable membrane potential range checks
 weight_bit_width: 4                 # Weight quantization bit-width
 act_bit_width: 4                    # Activation quantization bit-width
-output_bit_width: 16                # Higher precision for output layer (flow prediction)
-first_layer_bit_width: 8            # Keep first layer at 8-bit (higher than network 4-bit)
-mem_bit_width: 16                   # Higher precision for membrane potential
-log_params: true                    # Log model parameters and statistics to TensorBoard
+mem_bit_width: 16                   # Membrane potential bit-width (range check only)
 
-# Training Settings - Fine-tuning
-num_epochs: 3
-batch_size: 4
-val_batch_size: 4
-num_workers: 8
+# Quantization mode: "ptq" or "qat"
+quant_mode: 'qat'
 
-# Optimizer Settings - Even lower learning rate for aggressive quantization
-learning_rate: 0.00002              # Lower for 4-bit stability
-weight_decay: 0.0001
-lr_milestones: [15, 25]
+# Scale Type Options: "global" | "per_layer" | "per_channel"
+weight_scale_type: 'per_channel'    # Weight scale granularity
+act_scale_type: 'per_layer'         # Activation scale granularity
+
+# Distillation Settings
+distillation:
+  alpha: 0.5
+  temperature: 0.8
+  loss_type: 'epe'
+
+# Training Settings - Fine-tuning (more epochs for aggressive quantization)
+num_epochs: 15
+batch_size: 16
+val_batch_size: 16
+num_workers: 12
+
+# Optimizer Settings - Lower learning rate for 4-bit
+learning_rate: 0.00005              # Lower for 4-bit stability
+weight_decay: 0.0005
+lr_milestones: []
 lr_gamma: 0.5
 
-# Loss Weights
-flow_weight: 1.0
-angular_weight: 0.0              # Angular error loss weight (set >0 to enable)
-smooth_weight: 0.1
+# Loss Weights (same as base)
+endpoint_weight: 0.50
+angular_weight: 0.50
+epe_ang_weight: 0.00
+smoothness_weight: 0.000
+vertical_weight: 0.0
+effective_epe_weights: [0.0, 0.0, 0.0, 0.0, 0.0]
+directional_balance_weight: 0.00
+epe_type: 'epe'
 
 # Data Settings
-data_root: '../blink_sim/output/train'
-#data_root: '../train_set'
+data_root: '../blink_sim/output/train_set'
+val_data_root: '../blink_sim/output/valid_set'
 camera_size: [320, 320]
 use_events: true
-crop_size: [320, 320]
 max_train_samples: null
 max_val_samples: null
+augment_rotation: false
+event_mask_disable_epoch: 100
+disable_skip_epoch: 25
+flip_left_to_right_prob: 0.05
+flip_left_threshold: -0.1
+
+# Patch-based processing
+patch_mode: false
+patch_size: 64
+activity_threshold: 4
+
+# Flow clipping
+flow_clip_range: null
 
 # Training Loop Settings
 grad_clip: 1.0
 log_interval: 10
 save_interval: 5
+image_log_interval: 100

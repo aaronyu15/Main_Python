@@ -7,7 +7,7 @@ model_type: 'EventSNNFlowNetLite'   # Event-aware SNN architecture
 use_polarity: false                # Use separate channels for event polarities
 num_bins: 5                       # Event temporal bins - controls temporal history length
 bin_interval_us: 5000
-base_ch: 4                       # Base number of channels in encoder
+base_ch: 8                     # Base number of channels in encoder
 
 enable_logging_params: false                    # Log model parameters and statistics to TensorBoard
 
@@ -31,12 +31,11 @@ act_bit_width: 8
 mem_bit_width: 8
 
 distillation:
-  enabled: false
   # Alpha: Weight for distillation vs ground-truth loss
   #   0.0 = Pure ground-truth training (no teacher)
   #   0.5 = Balanced hybrid (recommended starting point)
   #   1.0 = Pure distillation (student learns only from teacher)
-  alpha: 1.0
+  alpha: 0.5
   
   # Temperature: Softens teacher outputs (higher = softer)
   #   1.0 = No softening (direct matching)
@@ -48,19 +47,19 @@ distillation:
   #   'cosine' = Cosine similarity (focuses on flow direction)
   #   'smooth_l1' = Huber loss (robust to outliers)
   #   'epe' = Endpoint error (same as GT loss)
-  loss_type: 'cosine'
+  loss_type: 'epe'
 
 
 # Training Settings
-num_epochs: 25                  # Faster training for prototyping
-batch_size: 4                      # Larger batch for small model
-val_batch_size: 4
-num_workers: 4                      # Use 0 to avoid multiprocessing with h5py
+num_epochs: 30                  # Faster training for prototyping
+batch_size: 16                     # Larger batch for small model
+val_batch_size: 16
+num_workers: 12                    # Use 0 to avoid multiprocessing with h5py
 
 # Optimizer Settings
 learning_rate: 0.0005              # Higher LR for faster convergence
 weight_decay: 0.01
-lr_milestones: [10]
+lr_milestones: []
 lr_gamma: 0.5
 
 # Loss Weights
@@ -88,7 +87,7 @@ use_events: true
 max_train_samples: null             # Limit for fast prototyping
 max_val_samples: null
 augment_rotation: false              # Random 90° rotations (0°, 90°, 180°, 270°)
-event_mask_disable_epoch: 50
+event_mask_disable_epoch: 100
 disable_skip_epoch: 25
 flip_left_to_right_prob: 0.05
 flip_left_threshold: -0.1

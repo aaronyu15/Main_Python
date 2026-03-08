@@ -9,12 +9,18 @@ class BaseLayer(nn.Module):
     def __init__(
         self,
         config: Optional[dict] = None,
-        weight_bit_width: int = 8,
-        act_bit_width: int = 8,
+        weight_bit_width: int = None,
+        act_bit_width: int = None,
         layer_name: str = "base",
     ):
         super().__init__()
         self.layer_name = layer_name
+        
+        # Get bit-widths from config if not specified, default to 8
+        if weight_bit_width is None:
+            weight_bit_width = config.get('weight_bit_width', 8) if config else 8
+        if act_bit_width is None:
+            act_bit_width = config.get('act_bit_width', 8) if config else 8
         
         # Separate bit-widths for weights and activations
         self.weight_bit_width = weight_bit_width
@@ -61,8 +67,8 @@ class QuantizedLinear(BaseLayer):
         out_feat: int,
         bias: bool = False,
         config: Optional[dict] = None,
-        weight_bit_width: int = 8,
-        act_bit_width: int = 8,
+        weight_bit_width: int = None,
+        act_bit_width: int = None,
         layer_name: str = "linear",
     ):
         super().__init__(config=config, weight_bit_width=weight_bit_width, act_bit_width=act_bit_width, layer_name=layer_name)
@@ -73,15 +79,22 @@ class QuantizedLinear(BaseLayer):
         )
 
         if self.quantize_weights:
-            self.weight_quant = QuantWeight()
+            self.weight_quant = QuantWeight(
+                bit_width=self.weight_bit_width,
+                layer_name=f"{layer_name}_weight",
+                num_channels=out_feat,  # Per-channel scales for output features
+                config=config,
+            )
         
         if self.quantize_activations:
             self.act_quant = QuantAct(
+                bit_width=self.act_bit_width,
+                layer_name=f"{layer_name}_act",
+                num_channels=out_feat,  # Per-channel scales for output features
                 config=config,
-                layer_name=self.layer_name,  
             )
         
-        self.weight = {'linear': self.lin.weight}
+        self.weights = {'linear': self.lin.weight}
     
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -119,8 +132,8 @@ class QuantizedConv2d(BaseLayer):
         use_norm = None,
         use_bias = None,
         config: Optional[dict] = None,
-        weight_bit_width: int = 8,
-        act_bit_width: int = 8,
+        weight_bit_width: int = None,
+        act_bit_width: int = None,
         layer_name: str = "conv",
     ):
         super().__init__(config=config, weight_bit_width=weight_bit_width, act_bit_width=act_bit_width, layer_name=layer_name)
@@ -139,12 +152,19 @@ class QuantizedConv2d(BaseLayer):
             self.norm = nn.InstanceNorm2d(out_channels, track_running_stats=True)
 
         if self.quantize_weights:
-            self.weight_quant = QuantWeight()
+            self.weight_quant = QuantWeight(
+                bit_width=self.weight_bit_width,
+                layer_name=f"{layer_name}_weight",
+                num_channels=out_channels,  # Per-channel scales for output channels
+                config=config,
+            )
         
         if self.quantize_activations:
             self.act_quant = QuantAct(
+                bit_width=self.act_bit_width,
+                layer_name=f"{layer_name}_act",
+                num_channels=out_channels,  # Per-channel scales for output channels
                 config=config,
-                layer_name=self.layer_name,  
             )
     
         self.weights = {'conv': self.conv.weight}
@@ -209,9 +229,9 @@ class QuantizedIF(nn.Module):
         spk = SurrogateSpike.apply(mem - self.threshold, self.alpha)
         mem = mem * (self.threshold - spk) 
     
-        # Quantize membrane again after reset if enabled
+        # Check membrane range (no fake quantization, just warning if out of range)
         if self.quantize_mem:
-            mem = QuantMembrane(mem, bit_width=self.mem_bit_width, mem_range=self.threshold * 2.0)
+            mem = check_membrane_range(mem, bit_width=self.mem_bit_width, mem_range=self.threshold * 2.0)
     
         return spk, mem
 
@@ -254,9 +274,9 @@ class QuantizedLIF(nn.Module):
         spk = SurrogateSpike.apply(mem - self.threshold, self.alpha)
         mem = mem * (self.threshold - spk) 
     
-        # Quantize membrane again after reset if enabled
+        # Check membrane range (no fake quantization, just warning if out of range)
         if self.quantize_mem:
-            mem = QuantMembrane(mem, bit_width=self.mem_bit_width, mem_range=self.threshold * 2.0)
+            mem = check_membrane_range(mem, bit_width=self.mem_bit_width, mem_range=self.threshold * 2.0)
     
         return spk, mem
 
