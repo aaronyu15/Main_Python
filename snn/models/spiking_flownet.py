@@ -311,17 +311,17 @@ class EventSNNFlowNetTeacher(nn.Module):
             option="spike_no_membrane"
         )
             
-        self.d1 = conv_layer(
-            self.base_ch,
-            self.base_ch,
-            k=3,
-            s=1,
-            p=1,
-            groups=1,
-            config=config,
-            layer_name="d1",
-            option="spike_no_membrane"
-        )
+        #self.d1 = conv_layer(
+        #    self.base_ch,
+        #    self.base_ch,
+        #    k=3,
+        #    s=1,
+        #    p=1,
+        #    groups=1,
+        #    config=config,
+        #    layer_name="d1",
+        #    option="spike_no_membrane"
+        #)
             
         # Flow prediction head
         self.flow_head = ConvBlock(
@@ -394,9 +394,9 @@ class EventSNNFlowNetTeacher(nn.Module):
 
             d2, mem_d2 = self.d2(d3, mem_d2)
 
-            d1, mem_d1 = self.d1(d2, mem_d1)
+            #d1, mem_d1 = self.d1(d2, mem_d1)
 
-            d1 = F.interpolate(d1, scale_factor=2, mode="nearest")
+            d1 = F.interpolate(d2, scale_factor=2, mode="nearest")
             d1 = d1 + s2 #if self.disable_skip is False else d2                                                                  
 
             d1 = F.interpolate(d1, scale_factor=2, mode="nearest")

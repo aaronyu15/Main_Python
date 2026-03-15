@@ -15,23 +15,23 @@ Examples:
     # Full-precision model (config embedded in checkpoint)
     python tools/examine_model.py checkpoints/teacher_10000u/best_model.pth
 
-    # Quantized model (needs config for quant settings)
+    # Quantized model (config has quantized: true)
     python tools/examine_model.py checkpoints/ptq_8bit/ptq_model.pth \\
-        --config snn/configs/event_snn_lite_8bit.yaml --quantized
+        --config snn/configs/event_snn_lite_8bit.yaml
 
     # Export integer weights to a .pt file for FPGA tooling
     python tools/examine_model.py checkpoints/ptq_8bit/ptq_model.pth \\
-        --config snn/configs/event_snn_lite_8bit.yaml --quantized \\
+        --config snn/configs/event_snn_lite_8bit.yaml \\
         --export exported_weights.pt
 
     # Filter layers by regex
     python tools/examine_model.py checkpoints/ptq_8bit/ptq_model.pth \\
-        --config snn/configs/event_snn_lite_8bit.yaml --quantized \\
+        --config snn/configs/event_snn_lite_8bit.yaml \\
         --grep "e1\\|d1"
 
     # Calibrate a full-precision model with PTQ and inspect scales
     python tools/examine_model.py checkpoints/teacher_10000u/best_model.pth \\
-        --config snn/configs/event_snn_lite_8bit.yaml --quantized \\
+        --config snn/configs/event_snn_lite_8bit.yaml \\
         --calibrate --data-root ../blink_sim/output/train_set
 """
 
@@ -51,11 +51,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils import load_config, get_model, build_model
 from snn.models.quant_utils import (
-    QuantWeight, QuantAct,
+    QuantWeight, QuantAct, OverflowTracker,
     print_scale_summary,
     export_quantized_params,
-    set_quant_mode,
     calibrate_model,
+    print_overflow_summary,
 )
 
 
@@ -63,15 +63,19 @@ from snn.models.quant_utils import (
 # Model loading
 # ============================================================================
 
-def load_model(checkpoint_path: str, config_path: Optional[str], quantized: bool,
+def load_model(checkpoint_path: str, config_path: Optional[str],
                device: str = 'cpu') -> tuple:
-    """Load model from checkpoint, returning (model, config, checkpoint_meta)."""
+    """Load model from checkpoint, returning (model, config, checkpoint_meta, is_quantized)."""
+
+    if config_path is not None:
+        config = load_config(config_path)
+    else:
+        config = None
+
+    quantized = config.get('quantized', False) if config else False
 
     if quantized:
-        if config_path is None:
-            raise ValueError("--config is required when using --quantized")
-
-        config = load_config(config_path)
+        # --- Quantized model ---
         model = get_model(config)
 
         ckpt = torch.load(checkpoint_path, map_location=device)
@@ -90,23 +94,21 @@ def load_model(checkpoint_path: str, config_path: Optional[str], quantized: bool
             print(f"  Unexpected keys ({len(unexpected)}): {unexpected[:5]}...")
 
         model.eval()
-        set_quant_mode(model, 'ptq')
-        return model, config, ckpt
+        return model, config, ckpt, True
 
     else:
-        if config_path is not None:
-            config = load_config(config_path)
+        if config is not None:
             model = get_model(config)
             ckpt = torch.load(checkpoint_path, map_location=device)
             sd = ckpt.get('model_state_dict', ckpt.get('state_dict', ckpt))
             model.load_state_dict(sd, strict=False)
             model.eval()
-            return model, config, ckpt
+            return model, config, ckpt, False
         else:
             model, config = build_model(None, device, train=False,
                                          checkpoint_path=checkpoint_path, strict=False)
             ckpt = torch.load(checkpoint_path, map_location=device)
-            return model, config, ckpt
+            return model, config, ckpt, False
 
 
 # ============================================================================
@@ -202,11 +204,9 @@ def print_quant_module_details(model: nn.Module, grep: Optional[str] = None) -> 
             has_any = True
             s = module.scale
             cal = "yes" if module._calibrated else "no"
-            mode = "ptq" if module._ptq_mode else "qat"
             print(f"\n  [QuantWeight] {name}")
             print(f"    bit_width:  {module.bit_width}")
             print(f"    scale_type: {module.scale_type}")
-            print(f"    mode:       {mode}")
             print(f"    calibrated: {cal}")
             if s.numel() == 1:
                 print(f"    scale:      {s.item():.8f}")
@@ -219,7 +219,6 @@ def print_quant_module_details(model: nn.Module, grep: Optional[str] = None) -> 
             s = module.scale
             zp = module.zero_point
             cal = "yes" if module._calibrated else "no"
-            mode = "ptq" if module._ptq_mode else "qat"
             print(f"\n  [QuantAct] {name}")
             print(f"    bit_width:   {module.bit_width}")
             print(f"    scale_type:  {module.scale_type}")
@@ -302,6 +301,22 @@ def print_export_summary(exported: Dict[str, Dict], grep: Optional[str] = None) 
                              f"shift: [{sh.min().item()}, {sh.max().item()}]  "
                              f"({mb}-bit multiplier)")
 
+        if 'threshold_int' in info:
+            th_f = info['threshold_float']
+            th_i = info['threshold_int']
+            lif_type = info.get('lif_type', '?')
+            lif_opt = info.get('lif_option', None)
+            opt_str = f"  option={lif_opt}" if lif_opt else ""
+            decay = info.get('decay', None)
+            decay_str = f"  decay={decay}" if decay is not None else ""
+            if th_i.numel() == 1:
+                parts.append(f"    LIF threshold: float={th_f}  int={th_i.item()}  "
+                             f"({lif_type}{opt_str}{decay_str})")
+            else:
+                parts.append(f"    LIF threshold: float={th_f}  "
+                             f"int=[{th_i.min().item()}, {th_i.max().item()}]  "
+                             f"(shape={tuple(th_i.shape)}, {lif_type}{opt_str}{decay_str})")
+
         for p in parts:
             print(p)
         print()
@@ -347,9 +362,7 @@ def parse_args():
     parser.add_argument('checkpoint', type=str,
                         help='Path to model checkpoint (.pth)')
     parser.add_argument('--config', type=str, default=None,
-                        help='Path to config YAML (required for --quantized)')
-    parser.add_argument('--quantized', action='store_true',
-                        help='Treat as a quantized model')
+                        help='Path to config YAML (quantized: true in config enables quant mode)')
 
     # What to show
     parser.add_argument('--no-arch', action='store_true',
@@ -376,7 +389,7 @@ def main():
     args = parse_args()
 
     print(f"Loading checkpoint: {args.checkpoint}")
-    model, config, ckpt = load_model(args.checkpoint, args.config, args.quantized)
+    model, config, ckpt, is_quantized = load_model(args.checkpoint, args.config)
 
     # ---- Checkpoint metadata ----
     print_checkpoint_meta(ckpt)
@@ -397,9 +410,12 @@ def main():
         print_weight_statistics(model, grep=args.grep)
 
     # ---- Quantization info ----
-    if args.quantized:
+    if is_quantized:
         print_scale_summary(model)
         print_quant_module_details(model, grep=args.grep)
+
+        # Overflow statistics (if any trackers were active during calibration)
+        print_overflow_summary(model)
 
         # Export
         exported = export_quantized_params(model)

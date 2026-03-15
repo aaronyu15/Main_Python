@@ -1,3 +1,26 @@
+"""
+Visualize SNN optical flow predictions on real CSV event data.
+
+Example usage:
+  # Full-precision model:
+  python visualize_predictions_csv.py \
+      --checkpoint ../checkpoints/teacher_10000u/best_model.pth \
+      --config ../snn/configs/lightweight.yaml \
+      --csv-file ../data/events.csv
+
+  # Quantized (PTQ) model:
+  python visualize_predictions_csv.py \
+      --checkpoint ../checkpoints/teacher_10000u_8bin/best_model.pth \
+      --config ../snn/configs/event_snn_lite_8bit.yaml \
+      --csv-file ../data/events.csv
+
+  # Integer-only inference (FPGA simulation):
+  python visualize_predictions_csv.py \
+      --checkpoint ../checkpoints/teacher_10000u_8bin/best_model.pth \
+      --config ../snn/configs/event_snn_lite_8bit.yaml \
+      --integer-sim --csv-file ../data/events.csv
+"""
+
 import argparse
 import torch
 import numpy as np
@@ -11,7 +34,7 @@ from visualize_predictions import visualize_events, flow_to_color
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from utils import load_config, build_model
+from utils import load_config, build_model, get_model
 from snn.utils import flow_to_color, visualize_events
 
 
@@ -342,9 +365,12 @@ def main():
         default='../output/visualizations_csv',
         help='Directory to save visualizations'
     )
+    parser.add_argument(
+        '--integer-sim',
+        action='store_true',
+        help='Use integer-only forward pass (bit-accurate FPGA simulation)'
+    )
 
-
-    
     args = parser.parse_args()
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -358,7 +384,39 @@ def main():
     
     
     print(f"\nLoading model from {args.checkpoint}")
-    model, config = build_model(None, device=str(device), train=False, checkpoint_path=args.checkpoint)
+    config_path = Path(args.config)
+    if config_path.exists():
+        config = load_config(args.config)
+        is_quantized = config.get('quantized', False)
+    else:
+        config = None
+        is_quantized = False
+
+    if is_quantized:
+        # Quantized model: build from external config, load weights separately
+        model = get_model(config)
+        checkpoint = torch.load(args.checkpoint, map_location=device)
+        state_dict = checkpoint.get('model_state_dict',
+                        checkpoint.get('state_dict', checkpoint))
+        model.load_state_dict(state_dict, strict=False)
+        model = model.to(device)
+        model.eval()
+        print(f"Loaded quantized model on {device}")
+    else:
+        model, config = build_model(None, device=str(device), train=False,
+                                    checkpoint_path=args.checkpoint)
+
+    model.disable_skip = True
+
+    # Optionally wrap in integer-only inference model
+    if args.integer_sim:
+        if not is_quantized:
+            raise ValueError("--integer-sim requires a quantized model config")
+        from snn.models.integer_inference import IntegerInferenceModel
+        model = IntegerInferenceModel(model, config,
+                                      accum_bit_width=config.get('accum_bit_width', 32))
+        model = model.to(device)
+        print("[IntegerSim] Using integer-only forward pass")
 
     num_bins = config.get('num_bins', 5)
     bin_interval_us = config.get('bin_interval_us', 5000.0)  # ms per bin

@@ -166,7 +166,17 @@ class QuantizedConv2d(BaseLayer):
                 num_channels=out_channels,  # Per-channel scales for output channels
                 config=config,
             )
-    
+
+        # Accumulator overflow tracker
+        self.accum_bit_width = config.get('accum_bit_width', 32) if config else 32
+        self.track_accum_overflow = config.get('track_accum_overflow', False) if config else False
+        if self.track_accum_overflow:
+            self.accum_overflow = OverflowTracker(
+                bit_width=self.accum_bit_width,
+                signed=True,
+                name=f"{layer_name}_accum",
+            )
+
         self.weights = {'conv': self.conv.weight}
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -186,7 +196,13 @@ class QuantizedConv2d(BaseLayer):
 
         if self.use_norm:
             out = self.norm(out)
-        
+
+        # Check accumulator overflow BEFORE requantization
+        if self.track_accum_overflow:
+            # Scale to integer domain using weight scale (accum is in weight-scale units)
+            scale = self.weight_quant.scale if self.quantize_weights else None
+            self.accum_overflow.check(out, scale=scale)
+
         if self.quantize_activations and self.act_bit_width < 32:   
             out_act = self.act_quant(out)
         else:
@@ -215,6 +231,16 @@ class QuantizedIF(nn.Module):
 
         self.mem = None
         self.option = option
+        self.layer_name = layer_name
+
+        # Membrane overflow tracker
+        self.track_mem_overflow = config.get('track_mem_overflow', False) if config else False
+        if self.track_mem_overflow:
+            self.mem_overflow = OverflowTracker(
+                bit_width=self.mem_bit_width,
+                signed=True,
+                name=f"{layer_name}_membrane",
+            )
 
     def forward(self, x, mem) -> Any:
         if mem is None:
@@ -232,7 +258,12 @@ class QuantizedIF(nn.Module):
         # Check membrane range (no fake quantization, just warning if out of range)
         if self.quantize_mem:
             mem = check_membrane_range(mem, bit_width=self.mem_bit_width, mem_range=self.threshold * 2.0)
-    
+
+        # Track membrane overflow
+        if self.track_mem_overflow:
+            mem_scale = (self.threshold * 2.0) / (2 ** (self.mem_bit_width - 1) - 1)
+            self.mem_overflow.check(mem, scale=torch.tensor(mem_scale))
+
         return spk, mem
 
 class QuantizedLIF(nn.Module):
@@ -253,6 +284,16 @@ class QuantizedLIF(nn.Module):
 
         self.mem = None
         self.option = option
+        self.layer_name = layer_name
+
+        # Membrane overflow tracker
+        self.track_mem_overflow = config.get('track_mem_overflow', False) if config else False
+        if self.track_mem_overflow:
+            self.mem_overflow = OverflowTracker(
+                bit_width=self.mem_bit_width,
+                signed=True,
+                name=f"{layer_name}_membrane",
+            )
 
     def forward(self, x, mem) -> Any:
 
@@ -277,7 +318,12 @@ class QuantizedLIF(nn.Module):
         # Check membrane range (no fake quantization, just warning if out of range)
         if self.quantize_mem:
             mem = check_membrane_range(mem, bit_width=self.mem_bit_width, mem_range=self.threshold * 2.0)
-    
+
+        # Track membrane overflow
+        if self.track_mem_overflow:
+            mem_scale = (self.threshold * 2.0) / (2 ** (self.mem_bit_width - 1) - 1)
+            self.mem_overflow.check(mem, scale=torch.tensor(mem_scale))
+
         return spk, mem
 
 class SurrogateSpike(torch.autograd.Function):

@@ -22,6 +22,7 @@ use_norm: false
 use_bias: false
 
 # Quantization Settings - 4-bit
+quantized: true                     # This is a quantized model config
 quantize_weights: true              # Enable weight quantization
 quantize_activations: true          # Enable activation quantization
 quantize_mem: true                  # Enable membrane potential range checks
@@ -29,8 +30,8 @@ weight_bit_width: 4                 # Weight quantization bit-width
 act_bit_width: 4                    # Activation quantization bit-width
 mem_bit_width: 16                   # Membrane potential bit-width (range check only)
 
-# Quantization mode: "ptq" or "qat"
-quant_mode: 'qat'
+# PTQ calibration
+num_calib_batches: 3000             # Number of batches for PTQ calibration
 
 # Scale Type Options: "global" | "per_layer" | "per_channel"
 weight_scale_type: 'per_channel'    # Weight scale granularity

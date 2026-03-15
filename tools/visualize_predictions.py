@@ -1,3 +1,31 @@
+"""
+Visualize SNN optical flow predictions on dataset samples.
+
+Example usage:
+  # Full-precision model:
+  python visualize_predictions.py \
+      --checkpoint ../checkpoints/teacher_10000u/best_model.pth \
+      --config ../snn/configs/lightweight.yaml \
+      --sequence girl1_BaseballHit_0 --sample-idx 0
+
+  # Quantized (PTQ) model:
+  python visualize_predictions.py \
+      --checkpoint ../checkpoints/teacher_10000u_8bin/best_model.pth \
+      --config ../snn/configs/event_snn_lite_8bit.yaml \
+      --sequence girl1_BaseballHit_0 --sample-idx 0
+
+  # Integer-only inference (FPGA simulation):
+  python visualize_predictions.py \
+      --checkpoint ../checkpoints/teacher_10000u_8bin/best_model.pth \
+      --config ../snn/configs/event_snn_lite_8bit.yaml \
+      --integer-sim --sequence girl1_BaseballHit_0 --sample-idx 0
+
+  # List available sequences:
+  python visualize_predictions.py \
+      --checkpoint ../checkpoints/teacher_10000u/best_model.pth \
+      --list-sequences
+"""
+
 import argparse
 import torch
 import numpy as np
@@ -10,7 +38,7 @@ import sys
 # Add parent directory to path to import from utils and snn
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from utils import load_config, build_model
+from utils import load_config, build_model, get_model
 from snn.dataset import OpticalFlowDataset
 from snn.utils import flow_to_color, visualize_events
 from snn.training import endpoint_error, angular_error
@@ -393,6 +421,11 @@ def main():
         default='cuda' if torch.cuda.is_available() else 'cpu',
         help='Device to run inference on'
     )
+    parser.add_argument(
+        '--integer-sim',
+        action='store_true',
+        help='Use integer-only forward pass (bit-accurate FPGA simulation)'
+    )
     
     args = parser.parse_args()
     
@@ -411,7 +444,33 @@ def main():
     
     # Load model
     print(f"Loading model from {args.checkpoint}")
-    model, _ = build_model(config, device=str(device), train=False, checkpoint_path=args.checkpoint)
+    is_quantized = config.get('quantized', False)
+    if is_quantized:
+        # Quantized model: build from external config, load weights separately
+        model = get_model(config)
+        checkpoint = torch.load(args.checkpoint, map_location=device)
+        state_dict = checkpoint.get('model_state_dict',
+                        checkpoint.get('state_dict', checkpoint))
+        model.load_state_dict(state_dict, strict=False)
+        model = model.to(device)
+        model.eval()
+        print(f"Loaded quantized model on {device}")
+    else:
+        model, config = build_model(config, device=str(device), train=False,
+                                    checkpoint_path=args.checkpoint)
+
+    model.disable_skip = True
+
+    # Optionally wrap in integer-only inference model
+    if args.integer_sim:
+        if not is_quantized:
+            raise ValueError("--integer-sim requires a quantized model config")
+        from snn.models.integer_inference import IntegerInferenceModel
+        model = IntegerInferenceModel(model, config,
+                                      accum_bit_width=config.get('accum_bit_width', 32))
+        model = model.to(device)
+        print("[IntegerSim] Using integer-only forward pass")
+
     print(f"Model loaded successfully on {device}")
     
     # Load dataset

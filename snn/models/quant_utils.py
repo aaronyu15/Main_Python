@@ -1,17 +1,11 @@
 """
-Simplified Quantization Utilities — PTQ and QAT
+Quantization Utilities — PTQ (Post-Training Quantization)
 
-Two modes:
-  PTQ (Post-Training Quantization):
-    - Load pretrained model, run calibration pass over data
-    - Scales computed from observed min/max (or percentile) statistics
-    - No training required
-
-  QAT (Quantization-Aware Training):
-    - Fake quantization in forward pass with STE (straight-through estimator)
-    - Weight scales derived from weight tensor each forward: scale = max(|w|) / qmax
-    - Activation scales tracked via EMA (exponential moving average) of running min/max
-    - Fine-tune the pretrained model (weights update, scales follow automatically)
+PTQ workflow:
+  1. Load pretrained float model
+  2. Run calibration pass over representative data
+  3. Scales computed from observed min/max statistics and frozen
+  4. Export integer weights and requantization parameters for FPGA
 
 Scale granularity:
   per_channel: one scale per output channel (best accuracy)
@@ -66,6 +60,167 @@ def _warn_if_clipped(tensor: torch.Tensor, qmin: int, qmax: int,
                 msg += " (suppressing further warnings)"
             warnings.warn(msg, RuntimeWarning)
             _QUANT_WARNING_COUNTS[key] = count + 1
+
+
+# ============================================================================
+# Overflow tracker — logs per-element overflow statistics
+# ============================================================================
+
+class OverflowTracker(nn.Module):
+    """
+    Tracks how often a tensor exceeds a fixed-point integer range.
+
+    Intended for monitoring accumulator / membrane overflow on FPGA-targeted
+    bit widths that are wider than the quantized weight/activation widths.
+
+    Maintains running counts:
+      - total_elements:  total number of scalar values observed
+      - overflow_count:  how many exceeded [qmin, qmax]
+      - underflow_count: how many fell below qmin
+      - overrun_count:   how many exceeded qmax
+
+    Overflow statistics are logged to TensorBoard when a logger is set.
+
+    Args:
+        bit_width:  integer bit width to check against (e.g. 16, 24, 32)
+        signed:     True for signed range [-2^(n-1), 2^(n-1)-1]
+        name:       identifier for logging
+    """
+    def __init__(self, bit_width: int = 32, signed: bool = True, name: str = "overflow"):
+        super().__init__()
+        self.bit_width = bit_width
+        self.signed = signed
+        self.name = name
+
+        if signed:
+            self.qmax = 2 ** (bit_width - 1) - 1
+            self.qmin = -self.qmax - 1
+        else:
+            self.qmax = 2 ** bit_width - 1
+            self.qmin = 0
+
+        # Running counters (not saved in state_dict — reset each run)
+        self.register_buffer('total_elements', torch.tensor(0, dtype=torch.long))
+        self.register_buffer('overflow_count', torch.tensor(0, dtype=torch.long))
+        self.register_buffer('underflow_count', torch.tensor(0, dtype=torch.long))
+        self.register_buffer('max_observed', torch.tensor(float('-inf')))
+        self.register_buffer('min_observed', torch.tensor(float('inf')))
+
+    def reset(self):
+        """Reset all counters."""
+        self.total_elements.zero_()
+        self.overflow_count.zero_()
+        self.underflow_count.zero_()
+        self.max_observed.fill_(float('-inf'))
+        self.min_observed.fill_(float('inf'))
+
+    @torch.no_grad()
+    def check(self, x: torch.Tensor, scale: Optional[torch.Tensor] = None):
+        """
+        Check tensor for overflow.
+
+        Args:
+            x: float tensor to check
+            scale: if provided, checks x/scale (i.e. the integer representation).
+                   If None, checks x directly as integer values.
+        """
+        if scale is not None:
+            scale = scale.abs().clamp(min=1e-10)
+            # Reshape scale for broadcasting if needed
+            if scale.dim() == 1 and x.dim() > 1:
+                shape = [1] * x.dim()
+                shape[1] = -1
+                scale = scale.view(*shape)
+            x_int = x / scale
+        else:
+            x_int = x
+
+        numel = x_int.numel()
+        over = (x_int > self.qmax).sum().item()
+        under = (x_int < self.qmin).sum().item()
+
+        self.total_elements.add_(numel)
+        self.overflow_count.add_(over)
+        self.underflow_count.add_(under)
+        self.max_observed = torch.max(self.max_observed, x_int.max())
+        self.min_observed = torch.min(self.min_observed, x_int.min())
+
+    def get_stats(self) -> Dict:
+        """Return overflow statistics as a dict."""
+        total = self.total_elements.item()
+        over = self.overflow_count.item()
+        under = self.underflow_count.item()
+        oob = over + under
+        pct = 100.0 * oob / max(total, 1)
+        return {
+            'total_elements': total,
+            'overflow_count': over,
+            'underflow_count': under,
+            'out_of_range': oob,
+            'out_of_range_pct': pct,
+            'max_observed': self.max_observed.item(),
+            'min_observed': self.min_observed.item(),
+            'qmin': self.qmin,
+            'qmax': self.qmax,
+            'bit_width': self.bit_width,
+        }
+
+    def log_to_logger(self, logger, step: int):
+        """Log overflow stats to TensorBoard via Logger."""
+        stats = self.get_stats()
+        prefix = f'overflow/{self.name}'
+        logger.log_scalar(f'{prefix}/out_of_range_pct', stats['out_of_range_pct'], step)
+        logger.log_scalar(f'{prefix}/overflow_count', stats['overflow_count'], step)
+        logger.log_scalar(f'{prefix}/underflow_count', stats['underflow_count'], step)
+        logger.log_scalar(f'{prefix}/max_observed', stats['max_observed'], step)
+        logger.log_scalar(f'{prefix}/min_observed', stats['min_observed'], step)
+        logger.log_scalar(f'{prefix}/total_elements', stats['total_elements'], step)
+
+    def __repr__(self):
+        stats = self.get_stats()
+        return (f"OverflowTracker({self.name}, {self.bit_width}-bit, "
+                f"oob={stats['out_of_range']}/{stats['total_elements']} "
+                f"({stats['out_of_range_pct']:.4f}%), "
+                f"range=[{stats['min_observed']:.2f}, {stats['max_observed']:.2f}], "
+                f"limits=[{self.qmin}, {self.qmax}])")
+
+
+def reset_all_overflow_trackers(model: nn.Module):
+    """Reset all OverflowTracker instances in a model."""
+    for module in model.modules():
+        if isinstance(module, OverflowTracker):
+            module.reset()
+
+
+def log_all_overflow_stats(model: nn.Module, logger, step: int):
+    """Log all OverflowTracker stats to TensorBoard."""
+    for module in model.modules():
+        if isinstance(module, OverflowTracker):
+            module.log_to_logger(logger, step)
+
+
+def print_overflow_summary(model: nn.Module):
+    """Print a summary table of all overflow trackers."""
+    print("\n" + "=" * 80)
+    print("Overflow / Range-Check Summary")
+    print("=" * 80)
+    header = f"  {'Name':<40s} {'Bits':>4s} {'OOB':>12s} {'OOB%':>8s} {'Min':>10s} {'Max':>10s} {'Limits'}"
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+
+    found = False
+    for name, module in model.named_modules():
+        if isinstance(module, OverflowTracker):
+            found = True
+            s = module.get_stats()
+            print(f"  {module.name:<40s} {s['bit_width']:>4d} "
+                  f"{s['out_of_range']:>12,d} {s['out_of_range_pct']:>7.3f}% "
+                  f"{s['min_observed']:>10.2f} {s['max_observed']:>10.2f} "
+                  f"[{s['qmin']}, {s['qmax']}]")
+
+    if not found:
+        print("  No OverflowTracker modules found.")
+    print("=" * 80 + "\n")
 
 
 # ============================================================================
@@ -139,7 +294,7 @@ def compute_weight_scale(weight: torch.Tensor, bit_width: int,
 
     scale = max(|w|) / qmax
 
-    This is recomputed every forward pass in QAT -- no learned parameter needed.
+    This is recomputed from the weight tensor (not a learned parameter).
     """
     qmax = 2 ** (bit_width - 1) - 1
 
@@ -233,10 +388,9 @@ class GlobalScale:
 
 class QuantWeight(nn.Module):
     """
-    Weight fake-quantizer.
+    Weight fake-quantizer (PTQ).
 
-    PTQ mode: scale is computed once during calibration and frozen (buffer).
-    QAT mode: scale is recomputed from weight statistics every forward pass.
+    Scale is computed once during calibration and frozen (buffer).
 
     Args:
         bit_width: quantization bit width
@@ -264,10 +418,6 @@ class QuantWeight(nn.Module):
 
         self.num_channels = num_channels
 
-        # Quant mode: "qat" (default) or "ptq"
-        quant_mode = config.get('quant_mode', 'qat') if config else 'qat'
-        self._ptq_mode = (quant_mode == 'ptq')
-
         # Scale stored as buffer (not a parameter -- not learned)
         if self.scale_type == 'per_channel' and num_channels > 1:
             self.register_buffer('scale', torch.ones(num_channels))
@@ -277,7 +427,7 @@ class QuantWeight(nn.Module):
         self._calibrated = False
 
     def calibrate(self, weight: torch.Tensor):
-        """Compute and freeze scale from weight tensor (used in PTQ)."""
+        """Compute and freeze scale from weight tensor."""
         with torch.no_grad():
             if self.scale_type == 'global':
                 s = GlobalScale.get_weight_scale()
@@ -294,26 +444,9 @@ class QuantWeight(nn.Module):
         self._calibrated = True
 
     def forward(self, weight: torch.Tensor) -> torch.Tensor:
-        if self._ptq_mode:
-            # PTQ: use frozen calibrated scale
-            if not self._calibrated:
-                self.calibrate(weight)
-            scale = self.scale
-        else:
-            # QAT: recompute scale from current weights each forward pass
-            if self.scale_type == 'global':
-                s = GlobalScale.get_weight_scale()
-                if s is not None:
-                    scale = s.to(weight.device)
-                else:
-                    scale = compute_weight_scale(weight, self.bit_width,
-                                                 'per_layer')
-            else:
-                scale = compute_weight_scale(weight, self.bit_width,
-                                             self.scale_type)
-            # Store for export
-            with torch.no_grad():
-                self.scale.copy_(scale)
+        if not self._calibrated:
+            self.calibrate(weight)
+        scale = self.scale
 
         # Reshape for broadcasting
         if scale.dim() == 1 and weight.dim() > 1:
@@ -335,9 +468,7 @@ class QuantWeight(nn.Module):
             torch.int8 if self.bit_width <= 8 else torch.int16)
 
     def extra_repr(self) -> str:
-        mode = "ptq" if self._ptq_mode else "qat"
-        return (f'bit_width={self.bit_width}, scale_type={self.scale_type}, '
-                f'mode={mode}')
+        return (f'bit_width={self.bit_width}, scale_type={self.scale_type}')
 
 
 # ============================================================================
@@ -346,10 +477,9 @@ class QuantWeight(nn.Module):
 
 class QuantAct(nn.Module):
     """
-    Activation fake-quantizer.
+    Activation fake-quantizer (PTQ).
 
-    PTQ mode: scale computed during calibration from observed min/max.
-    QAT mode: scale tracked via EMA of running min/max, fake-quantized with STE.
+    Scale is computed during calibration from observed min/max and frozen.
 
     Args:
         bit_width: quantization bit width
@@ -357,7 +487,7 @@ class QuantAct(nn.Module):
         layer_name: for debug messages
         num_channels: output channels (for per_channel mode)
         scale_type: "per_channel" | "per_layer" | "global"
-        ema_decay: decay factor for EMA of running min/max (QAT mode)
+        ema_decay: decay factor for EMA of running min/max during calibration
         config: config dict (overrides other args)
     """
     def __init__(self, bit_width: int = 8, symmetric: bool = True,
@@ -382,9 +512,6 @@ class QuantAct(nn.Module):
             self.scale_type = 'per_layer'
 
         self.num_channels = num_channels
-
-        quant_mode = config.get('quant_mode', 'qat') if config else 'qat'
-        self._ptq_mode = (quant_mode == 'ptq')
 
         # Buffers for scale, zero_point, and running stats
         if self.scale_type == 'per_channel' and num_channels > 1:
@@ -454,12 +581,8 @@ class QuantAct(nn.Module):
             # Calibration pass: observe stats but don't fake-quantize
             self._observe(x)
             return x
-        elif self.training and not self._ptq_mode:
-            # QAT: update running stats and fake-quantize
-            self._observe(x)
-            self._update_scale()
-        elif not self._calibrated and self._ptq_mode:
-            # PTQ but not yet calibrated -- pass through
+        elif not self._calibrated:
+            # Not yet calibrated -- pass through
             return x
 
         scale = self.scale
@@ -480,9 +603,8 @@ class QuantAct(nn.Module):
                                             self.layer_name, "activation")
 
     def extra_repr(self) -> str:
-        mode = "ptq" if self._ptq_mode else "qat"
         return (f'bit_width={self.bit_width}, scale_type={self.scale_type}, '
-                f'symmetric={self.symmetric}, mode={mode}')
+                f'symmetric={self.symmetric}')
 
 
 # ============================================================================
@@ -510,26 +632,6 @@ def check_membrane_range(mem: torch.Tensor, bit_width: int = 16,
 # Backwards-compatible alias
 def QuantMembrane(mem, bit_width=16, mem_range=2.0, layer_name="membrane"):
     return check_membrane_range(mem, bit_width, mem_range, layer_name)
-
-
-# ============================================================================
-# SurrogateSpike (unchanged -- needed by LIF/IF layers)
-# ============================================================================
-
-class SurrogateSpike(torch.autograd.Function):
-    """Hard threshold forward; sigmoid surrogate gradient backward."""
-    @staticmethod
-    def forward(ctx, x, alpha: float):
-        ctx.save_for_backward(x)
-        ctx.alpha = alpha
-        return (x > 0).to(x.dtype)
-
-    @staticmethod
-    def backward(ctx, grad_out):
-        (x,) = ctx.saved_tensors
-        alpha = ctx.alpha
-        s = torch.sigmoid(alpha * x)
-        return grad_out * alpha * s * (1 - s), None
 
 
 # ============================================================================
@@ -695,7 +797,8 @@ def export_quantized_params(model: nn.Module, multiplier_bits: int = 16) -> Dict
         multiplier_bits: bit width of the integer multiplier M_0 (default 16)
 
     Returns dict: {layer_name: {int_weight, weight_scale, act_scale,
-                                input_scale, M_real, M_0, shift, ...}}
+                                input_scale, M_real, M_0, shift,
+                                threshold_float, threshold_int, ...}}
     """
     exported = {}
 
@@ -703,6 +806,22 @@ def export_quantized_params(model: nn.Module, multiplier_bits: int = 16) -> Dict
     # In an SNN, inter-layer signals are spikes (0 or 1), so S_in = 1.0.
     # For the first layer, raw sensor input is clamped to [0, 1], also S_in = 1.0.
     prev_act_scale = torch.tensor(1.0)
+
+    # Build a map from parent module name to its LIF child's threshold + decay
+    # Hierarchy: e1.conv (QuantizedConv2d), e1.lif (QuantizedLIF/IF)
+    lif_info = {}
+    for name, module in model.named_modules():
+        # Detect LIF/IF modules by attribute (avoids circular import)
+        if hasattr(module, 'threshold') and hasattr(module, 'alpha') and hasattr(module, 'mem'):
+            # Parent is everything before the last component (e.g. "e1.lif" → "e1")
+            parts = name.rsplit('.', 1)
+            parent_name = parts[0] if len(parts) > 1 else ''
+            lif_info[parent_name] = {
+                'threshold': module.threshold,
+                'decay': getattr(module, 'decay', None),
+                'option': getattr(module, 'option', None),
+                'type': type(module).__name__,
+            }
 
     for name, module in model.named_modules():
         layer_info = {}
@@ -718,6 +837,14 @@ def export_quantized_params(model: nn.Module, multiplier_bits: int = 16) -> Dict
             layer_info['int_weight'] = wq.get_int_weight(weight).cpu()
             layer_info['weight_scale'] = wq.scale.cpu()
             layer_info['weight_bit_width'] = wq.bit_width
+            layer_info['float_weight'] = weight.detach().cpu()
+
+            # Save conv params for direct reconstruction
+            if hasattr(module, 'conv'):
+                conv = module.conv
+                layer_info['stride'] = conv.stride[0] if isinstance(conv.stride, tuple) else conv.stride
+                layer_info['padding'] = conv.padding[0] if isinstance(conv.padding, tuple) else conv.padding
+                layer_info['groups'] = conv.groups
 
         if hasattr(module, 'act_quant'):
             aq = module.act_quant
@@ -757,8 +884,35 @@ def export_quantized_params(model: nn.Module, multiplier_bits: int = 16) -> Dict
             layer_info['shift'] = shift_tensor
             layer_info['multiplier_bits'] = multiplier_bits
 
-            # Update prev_act_scale for next layer
-            prev_act_scale = aq.scale.cpu()
+            # --- Integer threshold for the sibling LIF neuron ---
+            # Find the parent SpikingConvBlock that owns both this conv and its LIF
+            parent_name = name.rsplit('.', 1)[0] if '.' in name else ''
+            lif = lif_info.get(parent_name)
+            if lif is not None:
+                theta_float = lif['threshold']
+                layer_info['threshold_float'] = theta_float
+                layer_info['lif_type'] = lif['type']
+                layer_info['lif_option'] = lif.get('option')
+
+                if lif.get('decay') is not None:
+                    layer_info['decay'] = lif['decay']
+
+                # theta_int = round(theta_float / S_act)
+                # Per-channel if S_act is per-channel
+                theta_int = (theta_float / s_out.clamp(min=1e-10)).round().long()
+                layer_info['threshold_int'] = theta_int
+
+            # Update prev_act_scale for next layer.
+            # For spiking layers (LIF/IF), the output is binary spikes (0/1),
+            # so the effective input scale for the next layer is 1.0.
+            # For non-spiking layers (ConvBlock), the output stays in the
+            # requantized domain, so propagate the act scale.
+            parent_name_for_scale = name.rsplit('.', 1)[0] if '.' in name else ''
+            if parent_name_for_scale in lif_info:
+                # This conv has a sibling LIF → output is spikes → S_in=1.0
+                prev_act_scale = torch.tensor(1.0)
+            else:
+                prev_act_scale = aq.scale.cpu()
 
         if layer_info:
             exported[name] = layer_info
@@ -787,11 +941,13 @@ def _decompose_multiplier(m_real: float, m_bits: int = 16):
     if m_real <= 0 or not math.isfinite(m_real):
         return 0, 0
 
+
     # Normalize m_real into [0.5, 1.0): find exponent
     exp = math.floor(math.log2(m_real))
     significand = m_real / (2.0 ** exp)  # in [1.0, 2.0)
     significand /= 2.0                   # in [0.5, 1.0)
     exp += 1
+
 
     # M_0 = round(significand * 2^m_bits)
     m0 = int(round(significand * (1 << m_bits)))
@@ -804,15 +960,4 @@ def _decompose_multiplier(m_real: float, m_bits: int = 16):
     return m0, shift
 
 
-def set_quant_mode(model: nn.Module, mode: str):
-    """
-    Switch all quantizers between 'ptq' and 'qat' mode.
 
-    Args:
-        model: model containing QuantWeight/QuantAct modules
-        mode: 'ptq' or 'qat'
-    """
-    ptq = (mode == 'ptq')
-    for module in model.modules():
-        if isinstance(module, (QuantWeight, QuantAct)):
-            module._ptq_mode = ptq

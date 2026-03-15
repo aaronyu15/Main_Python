@@ -1,32 +1,25 @@
 """
-Quantization Script — supports both PTQ and QAT.
+PTQ Calibration Script
 
-Modes:
-  PTQ (Post-Training Quantization):
-    - Load pretrained model, run calibration pass, export quantized model
-    - No training required — just calibration over a few batches of data
-
-  QAT (Quantization-Aware Training):
-    - Load pretrained model, fine-tune with fake quantization (STE)
-    - Weight scales derived from weight statistics (not learned)
-    - Activation scales tracked via EMA of running min/max
+Post-Training Quantization:
+  - Load pretrained model, run calibration pass, export quantized model
+  - No training required — just calibration over a few batches of data
 
 Usage:
-    # PTQ: calibrate and save quantized model (no training)
+    # Basic PTQ calibration:
     python finetune_quantized.py \
         --config snn/configs/event_snn_lite_8bit.yaml \
         --pretrained checkpoints/student_main/best_model.pth \
-        --mode ptq \
-        --checkpoint-dir checkpoints/ptq_8bit
+        --checkpoint-dir checkpoints/ptq_8bit \
         --log-dir logs/ptq_8bit
 
-    # QAT: fine-tune with 8-bit quantization
+    # With integer inference export (saves integer params + model report):
     python finetune_quantized.py \
         --config snn/configs/event_snn_lite_8bit.yaml \
-        --pretrained checkpoints/teacher_10000u/best_model.pth \
-        --mode qat \
-        --checkpoint-dir checkpoints/qat_8bit \
-        --log-dir logs/qat_8bit
+        --pretrained checkpoints/student_main/best_model.pth \
+        --checkpoint-dir checkpoints/ptq_8bit \
+        --log-dir logs/ptq_8bit \
+        --export-integer
 """
 import argparse
 import yaml
@@ -42,7 +35,8 @@ from snn.training import SNNTrainer
 from snn.utils.logger import Logger
 from snn.models.quant_utils import (
     enable_quantization_warnings, reset_quantization_warning_counts,
-    calibrate_model, set_quant_mode, print_scale_summary, export_quantized_params
+    calibrate_model, print_scale_summary, export_quantized_params,
+    reset_all_overflow_trackers, log_all_overflow_stats, print_overflow_summary,
 )
 from snn.utils.visualization import visualize_flow
 from torchvision.utils import make_grid
@@ -53,7 +47,7 @@ from utils import load_config, get_model
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Quantization-Aware Fine-tuning for SNN')
+    parser = argparse.ArgumentParser(description='PTQ Calibration for SNN')
     
     # Config
     parser.add_argument('--config', type=str, required=True,
@@ -61,9 +55,7 @@ def parse_args():
     
     # Pretrained model
     parser.add_argument('--pretrained', type=str, required=True,
-                      help='Path to pre-trained model checkpoint to fine-tune from')
-    parser.add_argument('--mode', type=str, default='qat', choices=['ptq', 'qat'],
-                      help='Quantization mode: ptq (calibrate only) or qat (fine-tune)')
+                      help='Path to pre-trained model checkpoint to calibrate')
     
     # Training settings
     parser.add_argument('--resume', type=str, default=None,
@@ -86,6 +78,8 @@ def parse_args():
                       help='Disable quantization range warnings')
     parser.add_argument('--strict-load', action='store_true',
                       help='Use strict mode when loading pretrained weights')
+    parser.add_argument('--export-integer', action='store_true',
+                      help='Export integer inference parameters into checkpoint and generate model report')
     
     return parser.parse_args()
 
@@ -212,6 +206,173 @@ def print_quantization_info(config: dict):
     print("="*60 + "\n")
 
 
+def _fmt_tensor_1d(t, max_per_line=16):
+    """Format a 1D tensor as a compact string."""
+    vals = t.view(-1).tolist()
+    if len(vals) <= max_per_line:
+        return '[' + ', '.join(f'{v:g}' for v in vals) + ']'
+    lines = []
+    for i in range(0, len(vals), max_per_line):
+        chunk = vals[i:i+max_per_line]
+        lines.append('  ' + ', '.join(f'{v:g}' for v in chunk))
+    return '[\n' + ',\n'.join(lines) + '\n]'
+
+
+def _fmt_kernel(t):
+    """Format a 2D kernel (e.g. 3×3) as a readable grid."""
+    rows = []
+    for r in range(t.shape[0]):
+        row_vals = ', '.join(f'{v:8.4f}' for v in t[r].tolist())
+        rows.append(f'  [{row_vals}]')
+    return '[\n' + '\n'.join(rows) + '\n]'
+
+
+def _fmt_kernel_int(t):
+    """Format a 2D integer kernel as a readable grid."""
+    rows = []
+    for r in range(t.shape[0]):
+        row_vals = ', '.join(f'{v:5d}' for v in t[r].tolist())
+        rows.append(f'  [{row_vals}]')
+    return '[\n' + '\n'.join(rows) + '\n]'
+
+
+def generate_model_report(exported, config, output_path, pretrained_from=None):
+    """Generate a comprehensive text file detailing the model structure and parameters."""
+    import datetime
+    lines = []
+    w = lines.append
+
+    w('=' * 72)
+    w('SNN Optical Flow Model — Comprehensive Parameter Report')
+    w('=' * 72)
+    w(f'Generated: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
+    if pretrained_from:
+        w(f'Pretrained from: {pretrained_from}')
+    w('')
+
+    # --- Configuration ---
+    w('=' * 72)
+    w('MODEL CONFIGURATION')
+    w('=' * 72)
+    for key in ['model_type', 'base_ch', 'use_polarity', 'num_bins',
+                'weight_bit_width', 'act_bit_width', 'mem_bit_width',
+                'accum_bit_width', 'multiplier_bits',
+                'weight_scale_type', 'act_scale_type',
+                'quantize_weights', 'quantize_activations', 'quantize_mem']:
+        val = config.get(key, '—')
+        w(f'  {key}: {val}')
+    w('')
+
+    # --- Network Structure Overview ---
+    w('=' * 72)
+    w('NETWORK STRUCTURE OVERVIEW')
+    w('=' * 72)
+    header = f'  {"Layer":<15s} {"Weight Shape":<18s} {"Stride":>6s} {"Pad":>4s} {"Groups":>6s} {"LIF Type"}'
+    w(header)
+    w('  ' + '-' * 70)
+
+    for conv_name, params in exported.items():
+        name = conv_name.rsplit('.', 1)[0] if '.' in conv_name else conv_name
+        if 'int_weight' not in params:
+            continue
+        shape_str = 'x'.join(str(d) for d in params['int_weight'].shape)
+        stride = params.get('stride', '?')
+        padding = params.get('padding', '?')
+        groups = params.get('groups', '?')
+        if 'lif_type' in params:
+            lif_str = params['lif_type']
+            opt = params.get('lif_option')
+            if opt:
+                lif_str += f' ({opt})'
+        else:
+            lif_str = '— (no LIF)'
+        w(f'  {name:<15s} {shape_str:<18s} {stride:>6} {padding:>4} {groups:>6} {lif_str}')
+    w('')
+
+    # --- Detailed Layer Parameters ---
+    w('=' * 72)
+    w('DETAILED LAYER PARAMETERS')
+    w('=' * 72)
+
+    for conv_name, params in exported.items():
+        name = conv_name.rsplit('.', 1)[0] if '.' in conv_name else conv_name
+        if 'int_weight' not in params:
+            continue
+
+        w('')
+        w('─' * 72)
+        w(f'Layer: {conv_name}')
+        if 'lif_type' in params:
+            w(f'Block: SpikingConvBlock (QuantizedConv2d + {params["lif_type"]})')
+        else:
+            w(f'Block: ConvBlock (QuantizedConv2d, no LIF)')
+        w('─' * 72)
+
+        wt = params['int_weight']
+        w(f'  Weight shape: {list(wt.shape)} ({wt.numel()} parameters)')
+        w(f'  Stride: {params.get("stride", "?")}, '
+          f'Padding: {params.get("padding", "?")}, '
+          f'Groups: {params.get("groups", "?")}')
+        w(f'  Weight bit width: {params.get("weight_bit_width", "?")}')
+        w(f'  Activation bit width: {params.get("act_bit_width", "?")}')
+
+        # Scales
+        w('')
+        w('  --- Quantization Scales ---')
+        w(f'  Weight scale (S_w): {_fmt_tensor_1d(params["weight_scale"])}')
+        w(f'  Input scale (S_in): {_fmt_tensor_1d(params.get("input_scale", torch.tensor(1.0)))}')
+        if 'act_scale' in params:
+            w(f'  Output activation scale (S_out): {_fmt_tensor_1d(params["act_scale"])}')
+
+        # Requantization
+        w('')
+        w('  --- Requantization: out = (M_0 * acc) >> shift ---')
+        w(f'  M_real:  {_fmt_tensor_1d(params["M_real"])}')
+        w(f'  M_0:     {_fmt_tensor_1d(params["M_0"])}')
+        w(f'  Shift:   {_fmt_tensor_1d(params["shift"])}')
+        w(f'  Multiplier bits: {params.get("multiplier_bits", "?")}')
+
+        # LIF
+        if 'lif_type' in params:
+            w('')
+            w('  --- LIF Neuron ---')
+            w(f'  Type: {params["lif_type"]}')
+            w(f'  Decay: {params.get("decay", "None")}')
+            w(f'  Option: {params.get("lif_option", "None")}')
+            w(f'  Threshold (float): {params["threshold_float"]}')
+            w(f'  Threshold (int):   {_fmt_tensor_1d(params["threshold_int"])}')
+
+        # Float weights
+        w('')
+        w('  --- Float Weights ---')
+        float_w = params.get('float_weight', None)
+        if float_w is not None:
+            Cout, Cin_g, kH, kW = float_w.shape
+            for ic in range(Cin_g):
+                for oc in range(Cout):
+                    w(f'  Input ch {ic}, Filter {oc}:')
+                    w(f'  {_fmt_kernel(float_w[oc, ic])}')
+        else:
+            w('  (not available)')
+
+        # Integer weights
+        w('')
+        w('  --- Integer Weights ---')
+        Cout, Cin_g, kH, kW = wt.shape
+        for ic in range(Cin_g):
+            for oc in range(Cout):
+                w(f'  Input ch {ic}, Filter {oc}:')
+                w(f'  {_fmt_kernel_int(wt[oc, ic])}')
+
+    w('')
+    w('=' * 72)
+    w('END OF REPORT')
+    w('=' * 72)
+
+    with open(output_path, 'w') as f:
+        f.write('\n'.join(lines) + '\n')
+
+
 def main():
     args = parse_args()
     
@@ -265,6 +426,7 @@ def main():
     
     # Logger
     logger = Logger(log_dir=args.log_dir)
+    print(args.log_dir)
     model.set_logger(logger)
     
     # Build dataloaders
@@ -278,18 +440,6 @@ def main():
     print(f"  Train samples: {len(train_loader.dataset)}")
     print(f"  Val samples: {len(val_loader.dataset)}")
     
-    # Create trainer
-    trainer = SNNTrainer(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        config=config,
-        device=device,
-        checkpoint_dir=args.checkpoint_dir,
-        log_dir=args.log_dir,
-        logger=logger 
-    )
-    
     # Log configuration
     logger.log_config(config, model=model)
     
@@ -298,126 +448,49 @@ def main():
     logger.log_text('quantization/weight_bits', str(config.get('weight_bit_width', 8)))
     logger.log_text('quantization/act_bits', str(config.get('act_bit_width', 8)))
     logger.log_text('quantization/mem_bits', str(config.get('mem_bit_width', 16)))
-    logger.log_text('quantization/mode', args.mode)
     
-    if args.mode == 'ptq':
-        # ---- PTQ: calibrate and save ----
-        print(f"\n[PTQ] Running post-training quantization...")
-        set_quant_mode(model, 'ptq')
-        
-        calibrate_model(
-            model, train_loader,
-            device=device,
-            num_batches=config.get('num_calib_batches', 100),
-            config=config,
-        )
-        
-        # Save calibrated model
-        save_path = Path(args.checkpoint_dir)
-        save_path.mkdir(parents=True, exist_ok=True)
+    # ---- PTQ: calibrate and save ----
+    print(f"\n[PTQ] Running post-training quantization...")
+    
+    calibrate_model(
+        model, train_loader,
+        device=device,
+        num_batches=config.get('num_calib_batches', 100),
+        config=config,
+    )
+    
+    # Save calibrated model
+    save_path = Path(args.checkpoint_dir)
+    save_path.mkdir(parents=True, exist_ok=True)
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'config': config,
+        'mode': 'ptq',
+        'pretrained_from': args.pretrained,
+    }, save_path / 'ptq_model.pth')
+    
+    print(f"\n[PTQ] Calibrated model saved to: {save_path / 'ptq_model.pth'}")
+
+    # Optionally export integer inference parameters
+    if args.export_integer:
+        multiplier_bits = config.get('multiplier_bits', 16)
+        print(f"\n[Export] Exporting integer inference parameters (multiplier_bits={multiplier_bits})...")
+        exported = export_quantized_params(model, multiplier_bits=multiplier_bits)
+
+        # Re-save checkpoint with integer params included
         torch.save({
             'model_state_dict': model.state_dict(),
             'config': config,
             'mode': 'ptq',
             'pretrained_from': args.pretrained,
+            'integer_params': exported,
         }, save_path / 'ptq_model.pth')
-        
-        print(f"\n[PTQ] Calibrated model saved to: {save_path / 'ptq_model.pth'}")
-        
-        # ---- PTQ: run validation with TensorBoard image logging ----
-        print(f"\n[PTQ] Running evaluation on validation set...")
-        model.eval()
-        
-        val_epe_total = 0.0
-        num_val_batches = 0
-        max_vis_images = config.get('max_images_log', 4)
-        num_bins = config.get('num_bins', 5)
-        vis_interval = config.get('log_interval', 10)
-        
-        with torch.no_grad():
-            for batch_idx, batch in enumerate(val_loader):
-                inputs = batch['input'].to(device)
-                gt_flow = batch['flow'].to(device)
-                valid_mask = batch['valid_mask'].to(device)
-                
-                outputs = model(inputs)
-                pred_flow = outputs.get('flow', outputs.get('pred_flow',
-                    list(outputs.values())[0])) if isinstance(outputs, dict) else outputs
-                
-                # Compute EPE
-                epe = torch.norm(pred_flow - gt_flow, p=2, dim=1, keepdim=True)
-                valid_epe = (epe * valid_mask).sum() / valid_mask.sum().clamp(min=1)
-                val_epe_total += valid_epe.item()
-                num_val_batches += 1
-                
-                # Log images every vis_interval batches
-                if batch_idx % vis_interval == 0:
-                    bs = min(inputs.shape[0], max_vis_images)
-                    
-                    # Events
-                    event_sum = inputs[:bs].sum(dim=2, keepdim=True)
-                    event_vis = event_sum.repeat(1, 1, 3, 1, 1)
-                    grid = make_grid(event_vis.view(-1, 3, event_vis.shape[3], event_vis.shape[4]),
-                                     nrow=num_bins, normalize=False, pad_value=1.0)
-                    logger.log_image('ptq/events', grid, batch_idx)
-                    
-                    # Valid mask
-                    valid_vis = valid_mask[:bs].repeat(1, 1, 3, 1, 1)
-                    grid = make_grid(valid_vis.view(-1, 3, valid_vis.shape[3], valid_vis.shape[4]),
-                                     nrow=num_bins, normalize=False, pad_value=1.0)
-                    logger.log_image('ptq/valid_mask', grid, batch_idx)
-                    
-                    max_flow = min(torch.norm(gt_flow, dim=1).max().item(), 1.0)
-                    
-                    # GT flow, predicted flow, and masked versions
-                    gt_vis, pred_vis = [], []
-                    gt_mask_vis, pred_mask_vis = [], []
-                    for i in range(bs):
-                        gt_c = visualize_flow(gt_flow[i].cpu(), max_flow=max_flow)
-                        gt_vis.append(torch.from_numpy(gt_c).permute(2,0,1).float() / 255.0)
-                        
-                        pr_c = visualize_flow(pred_flow[i].cpu(), max_flow=max_flow)
-                        pred_vis.append(torch.from_numpy(pr_c).permute(2,0,1).float() / 255.0)
-                        
-                        gt_m = visualize_flow((gt_flow[i] * valid_mask[i]).cpu(), max_flow=max_flow)
-                        gt_mask_vis.append(torch.from_numpy(gt_m).permute(2,0,1).float() / 255.0)
-                        
-                        pr_m = visualize_flow((pred_flow[i] * valid_mask[i]).cpu(), max_flow=max_flow)
-                        pred_mask_vis.append(torch.from_numpy(pr_m).permute(2,0,1).float() / 255.0)
-                    
-                    logger.log_image('ptq/gt_flow',
-                        make_grid(torch.stack(gt_vis), nrow=2, pad_value=1.0), batch_idx)
-                    logger.log_image('ptq/pred_flow',
-                        make_grid(torch.stack(pred_vis), nrow=2, pad_value=1.0), batch_idx)
-                    logger.log_image('ptq/gt_flow_masked',
-                        make_grid(torch.stack(gt_mask_vis), nrow=2, pad_value=1.0), batch_idx)
-                    logger.log_image('ptq/pred_flow_masked',
-                        make_grid(torch.stack(pred_mask_vis), nrow=2, pad_value=1.0), batch_idx)
-                    
-                    # Log per-batch EPE as a scalar too
-                    logger.log_scalar('ptq/batch_epe', valid_epe.item(), batch_idx)
-        
-        val_epe_avg = val_epe_total / max(num_val_batches, 1)
-        logger.log_scalar('ptq/val_epe', val_epe_avg, 0)
-        
-        print(f"[PTQ] Validation EPE: {val_epe_avg:.4f} (over {num_val_batches} batches)")
-        print(f"[PTQ] TensorBoard images logged to: {args.log_dir}")
-        
-    else:
-        # ---- QAT: fine-tune with fake quantization ----
-        set_quant_mode(model, 'qat')
-        
-        num_epochs = config.get('num_epochs', 100)
-        print(f"\n[QAT] Starting quantization-aware fine-tuning for {num_epochs} epochs...")
-        trainer.train(num_epochs=num_epochs, resume=args.resume)
-        
-        print_scale_summary(model)
-        
-        print("\n" + "="*60)
-        print("Quantization-Aware Fine-tuning Complete!")
-        print("="*60)
-        print(f"Best model saved to: {args.checkpoint_dir}/best_model.pth")
-        print(f"Logs saved to: {args.log_dir}")
+        print(f"[Export] Saved checkpoint with integer params: {save_path / 'ptq_model.pth'}")
+
+        # Generate comprehensive text report
+        report_path = save_path / 'model_report.txt'
+        generate_model_report(exported, config, report_path, args.pretrained)
+        print(f"[Export] Model report saved to: {report_path}")
 
 
 if __name__ == '__main__':

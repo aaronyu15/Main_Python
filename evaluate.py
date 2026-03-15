@@ -1,18 +1,23 @@
 """
 Evaluation script for trained SNN models.
 
-Supports both full-precision and quantized (PTQ/QAT) models.
+Supports both full-precision and quantized (PTQ) models.
 Logs TensorBoard visualizations (events, flow, masks) alongside numeric metrics.
 
 Usage:
     # Evaluate full-precision model (config embedded in checkpoint)
     python evaluate.py --checkpoint checkpoints/teacher_10000u/best_model.pth
 
-    # Evaluate quantized model (requires --config for quant settings)
+    # Evaluate quantized model (config contains quantized: true)
+    python evaluate.py \
+        --checkpoint checkpoints/ptq_8bit/ptq_model.pth \
+        --config snn/configs/event_snn_lite_8bit.yaml
+
+    # Integer-only simulation (bit-accurate FPGA emulation)
     python evaluate.py \
         --checkpoint checkpoints/ptq_8bit/ptq_model.pth \
         --config snn/configs/event_snn_lite_8bit.yaml \
-        --quantized
+        --integer-sim
 
     # Custom data root and TensorBoard log dir
     python evaluate.py \
@@ -35,6 +40,7 @@ from snn.training import endpoint_error, calculate_outliers, angular_error, epe_
 from snn.utils.logger import Logger
 from snn.utils.visualization import visualize_flow
 from torchvision.utils import make_grid
+from snn.models.quant_utils import print_scale_summary, log_all_overflow_stats, print_overflow_summary
 
 from utils import *
 
@@ -46,8 +52,6 @@ def parse_args():
                       help='Path to model checkpoint')
     parser.add_argument('--config', type=str, default=None,
                       help='Path to config YAML (required for quantized models, optional for full-precision)')
-    parser.add_argument('--quantized', action='store_true',
-                      help='Load as a quantized model (applies quant config and sets PTQ mode)')
     parser.add_argument('--data-root', type=str, default=None,
                       help='Root directory for dataset (overrides config)')
     parser.add_argument('--output-dir', type=str, default='./results',
@@ -64,6 +68,10 @@ def parse_args():
                       help='Device to use (cuda or cpu)')
     parser.add_argument('--strict-load', action='store_true',
                       help='Use strict mode when loading weights')
+    parser.add_argument('--integer-sim', action='store_true',
+                      help='Use integer-only forward pass (bit-accurate FPGA simulation)')
+    parser.add_argument('--stats-interval', type=int, default=20,
+                      help='Collect integer pipeline stats every N samples (default: 200)')
 
     return parser.parse_args()
 
@@ -73,18 +81,21 @@ def build_eval_model(args, device):
     Build and load model for evaluation.
 
     For full-precision models: loads config from checkpoint.
-    For quantized models: loads config from --config YAML, builds quantized model,
-    then loads weights from checkpoint.
+    For quantized models: loads config from --config YAML (detects quantized: true),
+    builds quantized model, then loads weights from checkpoint.
 
     Returns:
-        (model, config) tuple
+        (model, config, is_quantized) tuple
     """
-    if args.quantized:
-        # --- Quantized model ---
-        if args.config is None:
-            raise ValueError("--config is required when using --quantized")
-
+    if args.config is not None:
         config = load_config(args.config)
+    else:
+        config = None
+
+    is_quantized = config.get('quantized', False) if config else False
+
+    if is_quantized:
+        # --- Quantized model ---
 
         # Build model with quantization config
         model = get_model(config)
@@ -108,9 +119,6 @@ def build_eval_model(args, device):
         model = model.to(device)
         model.eval()
 
-        # Set quantization mode to PTQ (inference)
-        from snn.models.quant_utils import set_quant_mode, print_scale_summary
-        set_quant_mode(model, 'ptq')
         print_scale_summary(model)
 
         quant_info = (f"W{config.get('weight_bit_width', 32)}"
@@ -124,9 +132,7 @@ def build_eval_model(args, device):
 
     else:
         # --- Full-precision model ---
-        if args.config is not None:
-            # Use external config but load weights from checkpoint
-            config = load_config(args.config)
+        if config is not None:
             model = get_model(config)
 
             checkpoint = torch.load(args.checkpoint, map_location=device)
@@ -154,7 +160,233 @@ def build_eval_model(args, device):
                                          strict=args.strict_load)
 
     model.disable_skip = True
-    return model, config
+
+    # Optionally wrap in integer-only inference model
+    if getattr(args, 'integer_sim', False):
+        if not is_quantized:
+            raise ValueError("--integer-sim requires a quantized model config")
+        from snn.models.integer_inference import IntegerInferenceModel
+        model = IntegerInferenceModel(model, config,
+                                      accum_bit_width=config.get('accum_bit_width', 32))
+        model = model.to(device)
+        print("[IntegerSim] Using integer-only forward pass")
+
+    return model, config, is_quantized
+
+
+def _render_hist_image(values, title):
+    """Render a histogram as a torch image tensor [3, H, W] for TensorBoard."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import io
+    from PIL import Image
+    import torchvision.transforms.functional as TF
+
+    vals = values.numpy() if isinstance(values, torch.Tensor) else values
+    fig, ax = plt.subplots(figsize=(6, 3))
+    ax.hist(vals, bins=100, color='steelblue', edgecolor='none', alpha=0.8, log=True)
+    ax.set_title(title, fontsize=10)
+    ax.set_ylabel('Count')
+    ax.axvline(0, color='gray', linestyle='--', linewidth=0.8)
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=100)
+    plt.close(fig)
+    buf.seek(0)
+    img = Image.open(buf).convert('RGB')
+    return TF.to_tensor(img)
+
+
+def _plot_integer_histograms(all_metrics, output_dir):
+    """Plot per-layer membrane and x_int histograms aggregated across all samples."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    samples_with_stats = [m for m in all_metrics if 'int_stats' in m]
+    if not samples_with_stats:
+        return
+
+    # Collect raw tensors per layer across all samples
+    # key_map: {raw_key: (label, color)}
+    raw_keys = {
+        'lif_mem_raw': ('Membrane Potential', 'steelblue'),
+        'lif_x_int_raw': ('LIF Input (x_int)', 'coral'),
+    }
+
+    layer_data = {}  # {layer_name: {raw_key: [tensors]}}
+    for m in samples_with_stats:
+        for layer_name, layer_stats in m['int_stats'].items():
+            if layer_name == '_peak':
+                continue
+            for rk in raw_keys:
+                if rk in layer_stats:
+                    layer_data.setdefault(layer_name, {}).setdefault(rk, []).append(
+                        layer_stats[rk])
+
+    if not layer_data:
+        return
+
+    hist_dir = output_dir / 'integer_histograms'
+    hist_dir.mkdir(parents=True, exist_ok=True)
+
+    # Individual per-layer histograms
+    for layer_name, data in layer_data.items():
+        for rk, (label, color) in raw_keys.items():
+            if rk not in data:
+                continue
+            vals = torch.cat(data[rk], dim=0).numpy()
+            fig, ax = plt.subplots(figsize=(8, 4))
+            ax.hist(vals, bins=100, color=color, edgecolor='none', alpha=0.8)
+            ax.set_title(f'{label} Distribution — {layer_name}')
+            ax.set_xlabel('Value (integer)')
+            ax.set_ylabel('Count')
+            ax.axvline(0, color='gray', linestyle='--', linewidth=0.8)
+            fig.tight_layout()
+            short_key = rk.replace('lif_', '').replace('_raw', '')
+            fig.savefig(hist_dir / f'{layer_name}_{short_key}_hist.png', dpi=150)
+            plt.close(fig)
+
+    # Combined figures — one per raw key, with all layers stacked
+    for rk, (label, color) in raw_keys.items():
+        layers_with_key = [(ln, d[rk]) for ln, d in layer_data.items() if rk in d]
+        if not layers_with_key:
+            continue
+        n = len(layers_with_key)
+        fig, axes = plt.subplots(n, 1, figsize=(10, 3 * n))
+        if n == 1:
+            axes = [axes]
+        for ax, (layer_name, tensors) in zip(axes, layers_with_key):
+            vals = torch.cat(tensors, dim=0).numpy()
+            ax.hist(vals, bins=100, color=color, edgecolor='none', alpha=0.8)
+            ax.set_title(layer_name)
+            ax.set_ylabel('Count')
+            ax.axvline(0, color='gray', linestyle='--', linewidth=0.8)
+        axes[-1].set_xlabel('Value (integer)')
+        short_key = rk.replace('lif_', '').replace('_raw', '')
+        fig.suptitle(f'{label} Distributions (all samples)', fontsize=14, y=1.01)
+        fig.tight_layout()
+        fig.savefig(hist_dir / f'all_layers_{short_key}_hist.png', dpi=150,
+                    bbox_inches='tight')
+        plt.close(fig)
+
+    print(f"Integer histograms saved to {hist_dir}/")
+
+
+def _write_integer_stats_summary(all_metrics, output_dir):
+    """Write integer inference bit-width stats to a summary file."""
+    # Collect all samples that have int_stats
+    samples_with_stats = [m for m in all_metrics if 'int_stats' in m]
+    if not samples_with_stats:
+        return
+
+    stats_file = output_dir / 'integer_stats.txt'
+
+    # Gather all layer names and stat keys (excluding _peak)
+    layer_names = []
+    for m in samples_with_stats:
+        for name in m['int_stats']:
+            if name != '_peak' and name not in layer_names:
+                layer_names.append(name)
+
+    # Aggregate across all samples: take worst case (max) for bits, sum for counts
+    global_worst = {}  # {layer: {stat: worst_value}}
+    for m in samples_with_stats:
+        for layer_name, layer_stats in m['int_stats'].items():
+            if layer_name not in global_worst:
+                global_worst[layer_name] = {}
+            for key, val in layer_stats.items():
+                if 'raw' in key:
+                    continue  # skip raw tensors (handled by histogram plotter)
+                if 'bits' in key:
+                    global_worst[layer_name][key] = max(global_worst[layer_name].get(key, 0), val)
+                elif 'count' in key:
+                    global_worst[layer_name][key] = global_worst[layer_name].get(key, 0) + val
+                elif 'pct' in key:
+                    prev = global_worst[layer_name].get(key, [])
+                    if not isinstance(prev, list):
+                        prev = [prev]
+                    prev.append(val)
+                    global_worst[layer_name][key] = prev
+                else:
+                    global_worst[layer_name][key] = max(global_worst[layer_name].get(key, 0), val)
+
+    # Average the pct lists
+    for layer_stats in global_worst.values():
+        for key in list(layer_stats.keys()):
+            if isinstance(layer_stats[key], list):
+                layer_stats[key] = sum(layer_stats[key]) / len(layer_stats[key])
+
+    with open(stats_file, 'w') as f:
+        n = len(samples_with_stats)
+        f.write("INTEGER INFERENCE BIT-WIDTH ANALYSIS\n")
+        f.write("=" * 72 + "\n")
+        f.write(f"Samples analyzed: {n}\n\n")
+
+        # Per-layer summary
+        f.write("PER-LAYER SUMMARY (worst case across all samples & timesteps)\n")
+        f.write("-" * 72 + "\n")
+        f.write(f"{'Layer':<12s} {'Acc Bits':>10s} {'Product Bits':>14s} "
+                f"{'Mem Bits':>10s} {'Acc Overflow':>14s} {'Mem Overflow':>14s} "
+                f"{'Spike Rate':>12s}\n")
+        f.write("-" * 86 + "\n")
+
+        for name in layer_names:
+            if name not in global_worst:
+                continue
+            s = global_worst[name]
+            acc_bits = s.get('conv_acc_bits_max', '-')
+            prod_bits = s.get('conv_product_bits_max', '-')
+            mem_bits = s.get('lif_mem_bits_max', '-')
+            acc_ovf = s.get('conv_acc_overflow_count', 0)
+            mem_ovf = s.get('lif_mem_overflow_count', 0)
+            spike_pct = s.get('lif_spike_rate_pct', None)
+
+            acc_str = f"{acc_bits}" if isinstance(acc_bits, int) else str(acc_bits)
+            prod_str = f"{prod_bits}" if isinstance(prod_bits, int) else str(prod_bits)
+            mem_str = f"{mem_bits}" if isinstance(mem_bits, int) else str(mem_bits)
+            acc_ovf_str = f"{acc_ovf}"
+            mem_ovf_str = f"{mem_ovf}"
+            spike_str = f"{spike_pct:.1f}%" if spike_pct is not None else "-"
+
+            f.write(f"{name:<12s} {acc_str:>10s} {prod_str:>14s} "
+                    f"{mem_str:>10s} {acc_ovf_str:>14s} {mem_ovf_str:>14s} "
+                    f"{spike_str:>12s}\n")
+
+        f.write("\n")
+
+        # Global worst case
+        if '_peak' in global_worst:
+            peak = global_worst['_peak']
+            f.write("GLOBAL PEAK (worst case across all layers, samples & timesteps)\n")
+            f.write("-" * 72 + "\n")
+            for key in sorted(peak.keys()):
+                val = peak[key]
+                if isinstance(val, float):
+                    f.write(f"  {key:<40s} {val:.4f}\n")
+                else:
+                    f.write(f"  {key:<40s} {val}\n")
+            f.write("\n")
+
+        # Detailed per-layer stats
+        f.write("DETAILED PER-LAYER STATS\n")
+        f.write("-" * 72 + "\n")
+        for name in layer_names:
+            if name not in global_worst:
+                continue
+            f.write(f"\n  {name}:\n")
+            for key in sorted(global_worst[name].keys()):
+                val = global_worst[name][key]
+                if isinstance(val, float):
+                    f.write(f"    {key:<40s} {val:.4f}\n")
+                else:
+                    f.write(f"    {key:<40s} {val}\n")
+
+        f.write("\n" + "=" * 72 + "\n")
+
+    print(f"Integer stats summary saved to {stats_file}")
 
 
 def evaluate(args):
@@ -169,7 +401,7 @@ def evaluate(args):
     print(f"Using device: {device}")
 
     # Build model
-    model, config = build_eval_model(args, device)
+    model, config, is_quantized = build_eval_model(args, device)
 
     # Build dataset
     data_root = args.data_root or config.get('val_data_root',
@@ -194,13 +426,17 @@ def evaluate(args):
     logger = Logger(log_dir=args.log_dir)
     logger.log_text('eval/checkpoint', args.checkpoint)
     logger.log_text('eval/data_root', data_root)
-    logger.log_text('eval/quantized', str(args.quantized))
-    if args.quantized:
+    logger.log_text('eval/quantized', str(is_quantized))
+    if is_quantized:
         logger.log_text('eval/quant_config', args.config or 'embedded')
+    if getattr(args, 'integer_sim', False):
+        logger.log_text('eval/mode', 'integer_sim')
 
     vis_interval = args.log_interval
     max_vis_images = args.max_images
     num_bins = config.get('num_bins', 5)
+    stats_interval = args.stats_interval
+    is_integer_sim = getattr(args, 'integer_sim', False)
 
     # Metrics accumulator
     all_metrics = []
@@ -208,6 +444,11 @@ def evaluate(args):
     # Evaluate
     with torch.no_grad():
         for idx, batch in enumerate(tqdm(dataloader, desc="Evaluating")):
+            # Enable stats + raw tensor collection only on stats intervals
+            do_stats = is_integer_sim and (idx % stats_interval == 0)
+            if is_integer_sim and hasattr(model, 'enable_stats'):
+                model.enable_stats(do_stats)
+
             # Move to device
             inputs = batch['input'].to(device)
             gt_flow = batch['flow'].to(device)
@@ -252,6 +493,11 @@ def evaluate(args):
                     val = val.detach().cpu().item()
                 metrics[f'ang_mask_dir_{name}'] = float(val)
 
+            # Flow magnitude stats (matching trainer)
+            flow_mag = torch.norm(pred_flow, dim=1)
+            metrics['flow_max'] = flow_mag.max().item()
+            metrics['flow_avg'] = flow_mag.abs().mean().item()
+
             metrics['sequence'] = metadata['sequence'][0]
             metrics['index'] = metadata['index'][0].item()
 
@@ -267,6 +513,23 @@ def evaluate(args):
             if isinstance(epe_mask_val, torch.Tensor):
                 epe_mask_val = epe_mask_val.detach().cpu().item()
             logger.log_scalar('eval/sample_epe_masked', float(epe_mask_val), idx)
+
+            logger.log_scalar('eval/sample_flow_max', metrics['flow_max'], idx)
+            logger.log_scalar('eval/sample_flow_avg', metrics['flow_avg'], idx)
+
+            # ---- Integer inference stats (only on stats interval) ----
+            if do_stats and hasattr(model, 'last_sample_stats') and model.last_sample_stats:
+                metrics['int_stats'] = model.last_sample_stats
+                for layer_name, layer_stats in model.last_sample_stats.items():
+                    for stat_key, val in layer_stats.items():
+                        if isinstance(val, torch.Tensor):
+                            # Histogram images logged at hist_interval
+                            tag = f'int_stats/{layer_name}/{stat_key}'
+                            hist_img = _render_hist_image(val, f'{layer_name} / {stat_key}')
+                            logger.log_image(tag, hist_img, idx)
+                        else:
+                            tag = f'int_stats/{layer_name}/{stat_key}'
+                            logger.log_scalar(tag, float(val), idx)
 
             # ---- TensorBoard visualizations ----
             # Use valid_mask (after low-activity masking) to match the trainer
@@ -316,7 +579,7 @@ def evaluate(args):
 
     # Compute average metrics
     avg_metrics = {}
-    numeric_keys = [k for k in all_metrics[0].keys() if k not in ['sequence', 'index']]
+    numeric_keys = [k for k in all_metrics[0].keys() if k not in ['sequence', 'index', 'int_stats']]
     for key in numeric_keys:
         values = []
         for m in all_metrics:
@@ -334,14 +597,18 @@ def evaluate(args):
     logger.log_scalar('eval/avg_outliers_masked', avg_metrics['outliers_mask'], 0)
     logger.log_scalar('eval/avg_angular_error', avg_metrics['angular_error'], 0)
     logger.log_scalar('eval/avg_angular_error_masked', avg_metrics['angular_error_mask'], 0)
+    logger.log_scalar('eval/avg_flow_max', avg_metrics['flow_max'], 0)
+    logger.log_scalar('eval/avg_flow_avg', avg_metrics['flow_avg'], 0)
 
     # Print results
     print("\n" + "="*50)
     print("EVALUATION RESULTS")
     print("="*50)
     print(f"Checkpoint: {args.checkpoint}")
-    if args.quantized:
+    if is_quantized:
         print(f"Quantized config: {args.config}")
+    if getattr(args, 'integer_sim', False):
+        print(f"Mode: Integer-only simulation (FPGA-accurate)")
     print(f"Number of samples: {len(all_metrics)}")
     print(f"\nAverage Metrics:")
     print(f"  EPE: {avg_metrics['epe']:.4f} ± {avg_metrics['epe_std']:.4f}")
@@ -349,6 +616,8 @@ def evaluate(args):
     print(f"  Angular Error: {avg_metrics['angular_error']:.2f}° ± {avg_metrics['angular_error_std']:.2f}°")
     print(f"  EPE Weighted Angular Error: {avg_metrics['epe_weighted_angular_error']:.2f}° ± {avg_metrics['epe_weighted_angular_error_std']:.2f}°")
 
+    print(f"  Flow Max: {avg_metrics['flow_max']:.4f} ± {avg_metrics['flow_max_std']:.4f}")
+    print(f"  Flow Avg: {avg_metrics['flow_avg']:.4f} ± {avg_metrics['flow_avg_std']:.4f}")
     print(f"  EPE (Masked): {avg_metrics['epe_mask']:.4f} ± {avg_metrics['epe_mask_std']:.4f}")
     print(f"  Outliers (Masked): {avg_metrics['outliers_mask']:.2f}% ± {avg_metrics['outliers_mask_std']:.2f}%")
     print(f"  Angular Error (Masked): {avg_metrics['angular_error_mask']:.2f}° ± {avg_metrics['angular_error_mask_std']:.2f}°")
@@ -367,8 +636,10 @@ def evaluate(args):
         f.write("EVALUATION RESULTS\n")
         f.write("="*50 + "\n")
         f.write(f"Checkpoint: {args.checkpoint}\n")
-        if args.quantized:
+        if is_quantized:
             f.write(f"Quantized config: {args.config}\n")
+        if getattr(args, 'integer_sim', False):
+            f.write(f"Mode: Integer-only simulation (FPGA-accurate)\n")
         f.write(f"Number of samples: {len(all_metrics)}\n")
         f.write(f"\nAverage Metrics:\n")
         f.write(f"  EPE: {avg_metrics['epe']:.4f} ± {avg_metrics['epe_std']:.4f}\n")
@@ -377,6 +648,8 @@ def evaluate(args):
         f.write(f"  EPE Weighted Angular Error: {avg_metrics['epe_weighted_angular_error']:.2f} ± {avg_metrics['epe_weighted_angular_error_std']:.2f}\n")
 
         f.write(f"\n")
+        f.write(f"  Flow Max: {avg_metrics['flow_max']:.4f} ± {avg_metrics['flow_max_std']:.4f}\n")
+        f.write(f"  Flow Avg: {avg_metrics['flow_avg']:.4f} ± {avg_metrics['flow_avg_std']:.4f}\n")
         f.write(f"  EPE (Masked): {avg_metrics['epe_mask']:.4f} ± {avg_metrics['epe_mask_std']:.4f}\n")
         f.write(f"  Outliers (Masked): {avg_metrics['outliers_mask']:.2f}% ± {avg_metrics['outliers_mask_std']:.2f}%\n")
         f.write(f"  Angular Error (Masked): {avg_metrics['angular_error_mask']:.2f}° ± {avg_metrics['angular_error_mask_std']:.2f}°\n")
@@ -391,7 +664,18 @@ def evaluate(args):
             f.write(f"  Directional EPE masked: {{'left': {m['epe_mask_dir_left']:.4f}, 'right': {m['epe_mask_dir_right']:.4f}, 'up': {m['epe_mask_dir_up']:.4f}, 'down': {m['epe_mask_dir_down']:.4f}}}\n")
             f.write(f"  Directional AngErr masked: {{'left': {m['ang_mask_dir_left']:.2f}, 'right': {m['ang_mask_dir_right']:.2f}, 'up': {m['ang_mask_dir_up']:.2f}, 'down': {m['ang_mask_dir_down']:.2f}}}\n")
 
+    # Log and print overflow statistics (quantized models only)
+    if is_quantized:
+        log_all_overflow_stats(model, logger, step=0)
+        print_overflow_summary(model)
+
     print(f"\nResults saved to {results_file}")
+
+    # Write integer inference stats summary
+    if getattr(args, 'integer_sim', False):
+        _write_integer_stats_summary(all_metrics, output_dir)
+        _plot_integer_histograms(all_metrics, output_dir)
+
     print(f"TensorBoard logs saved to {args.log_dir}")
     print(f"  View with: tensorboard --logdir {args.log_dir}")
 
