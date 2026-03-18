@@ -9,16 +9,14 @@ Usage:
     # Basic PTQ calibration:
     python finetune_quantized.py \
         --config snn/configs/event_snn_lite_8bit.yaml \
-        --pretrained checkpoints/student_main/best_model.pth \
-        --checkpoint-dir checkpoints/ptq_8bit \
-        --log-dir logs/ptq_8bit
+        --pretrained checkpoints/02_no_d1/best_model.pth \
+        --name 02_no_d1
 
     # With integer inference export (saves integer params + model report):
     python finetune_quantized.py \
         --config snn/configs/event_snn_lite_8bit.yaml \
-        --pretrained checkpoints/student_main/best_model.pth \
-        --checkpoint-dir checkpoints/ptq_8bit \
-        --log-dir logs/ptq_8bit \
+        --pretrained checkpoints/02_no_d1/best_model.pth \
+        --name 02_no_d1 \
         --export-integer
 """
 import argparse
@@ -56,13 +54,15 @@ def parse_args():
     # Pretrained model
     parser.add_argument('--pretrained', type=str, required=True,
                       help='Path to pre-trained model checkpoint to calibrate')
+    parser.add_argument('--name', type=str, required=True,
+                      help='Path to pre-trained model checkpoint to calibrate')
     
     # Training settings
     parser.add_argument('--resume', type=str, default=None,
                       help='Path to checkpoint to resume fine-tuning from')
-    parser.add_argument('--checkpoint-dir', type=str, default='./checkpoints/quantized',
+    parser.add_argument('--checkpoint-dir', type=str, default='./checkpoints',
                       help='Directory to save checkpoints')
-    parser.add_argument('--log-dir', type=str, default='./logs/quantized',
+    parser.add_argument('--log-dir', type=str, default='./logs',
                       help='Directory for logs')
     parser.add_argument('--seed', type=int, default=42,
                       help='Random seed')
@@ -424,9 +424,11 @@ def main():
     print(f"Total parameters: {num_params:,}")
     print(f"Trainable parameters: {trainable_params:,}")
     
+    checkpoint_dir = Path(args.checkpoint_dir) / args.name
+    log_dir = Path(args.log_dir) / args.name
     # Logger
-    logger = Logger(log_dir=args.log_dir)
-    print(args.log_dir)
+    logger = Logger(log_dir=log_dir)
+    print(log_dir)
     model.set_logger(logger)
     
     # Build dataloaders
@@ -460,7 +462,7 @@ def main():
     )
     
     # Save calibrated model
-    save_path = Path(args.checkpoint_dir)
+    save_path = checkpoint_dir
     save_path.mkdir(parents=True, exist_ok=True)
     torch.save({
         'model_state_dict': model.state_dict(),

@@ -258,6 +258,16 @@ def main():
         print(f"  flow_head: weights={len(w_flat)}, "
               f"m0={len(fh_m0)}, shift={len(fh_shift)}")
 
+        # Flow head output scale (float)
+        if 'act_scale' in params:
+            fh_scale = params['act_scale'].flatten().tolist()
+            scale_path = out_dir / "flow_head_output_scale.mem"
+            with open(scale_path, "w") as f:
+                f.write(f"// flow_head output scale (float)\n")
+                for v in fh_scale:
+                    f.write(f"{v}\n")
+            print(f"  flow_head output scale: {fh_scale}")
+
         # Flow head hex files
         fh_w = params["int_weight"]
         fh_hex_header = (

@@ -8,7 +8,6 @@ from snn.models import *
 
 models = {
     'EventSNNFlowNetLite': EventSNNFlowNetLite,
-    'EventSNNFlowNetTeacher': EventSNNFlowNetTeacher,
     'OtherModel': None,  
 }
 

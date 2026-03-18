@@ -91,6 +91,10 @@ class IntegerConv2d:
         self.collect_stats = False
         self.last_stats = {}
 
+        # Debug capture (disabled by default)
+        self.collect_debug = False
+        self.debug_data = {}
+
     def __call__(self, x_int: torch.Tensor) -> torch.Tensor:
         """
         Args:
@@ -125,6 +129,10 @@ class IntegerConv2d:
             self.last_stats['acc_overflow_count'] = n_over
             self.last_stats['acc_overflow_pct'] = n_over / max(acc.numel(), 1) * 100
 
+        # Capture raw convolution sum (before overflow handling)
+        if self.collect_debug:
+            self.debug_data['sum'] = acc.detach().clone()
+
         # Handle accumulator overflow (wrap or clamp)
         acc = _overflow_handle(acc, self.accum_bit_width, self.overflow_mode)
 
@@ -149,6 +157,19 @@ class IntegerConv2d:
                                torch.ones_like(shift) << (shift - 1),
                                torch.zeros_like(shift))
         out = (product + rounding) >> shift
+
+        if self.collect_stats:
+            out_min_val = int(out.min().item())
+            out_max_val = int(out.max().item())
+            self.last_stats['out_bits_min'] = _signed_bits_needed(out_min_val)
+            self.last_stats['out_bits_max'] = _signed_bits_needed(out_max_val)
+            n_over = ((out > self.act_qmax) | (out < self.act_qmin)).sum().item()
+            self.last_stats['out_overflow_count'] = n_over
+            self.last_stats['out_overflow_pct'] = n_over / max(out.numel(), 1) * 100
+
+        # Capture product (M_0 * acc, before shift)
+        if self.collect_debug:
+            self.debug_data['prod'] = product.detach().clone()
 
         # Handle output overflow (wrap or clamp)
         out = _overflow_handle(out, self.act_bit_width, self.overflow_mode).to(torch.int32)
@@ -188,6 +209,10 @@ class IntegerLIF:
         self.collect_raw = False
         self.last_stats = {}
 
+        # Debug capture (disabled by default)
+        self.collect_debug = False
+        self.debug_data = {}
+
         # Precompute decay shift if decay is a power of 2
         self.decay_shift = None
         if decay is not None and decay > 0:
@@ -216,6 +241,8 @@ class IntegerLIF:
             # No membrane state — just threshold the input directly
             threshold = self.threshold_int.view(1, -1, 1, 1).to(x_int.device)
             spike = (x_int > threshold).to(torch.int32)
+            if self.collect_debug:
+                self.debug_data['fm_out'] = spike.detach().clone()
             if self.collect_stats:
                 active = (x_int != 0).sum().item()
                 fired = spike.sum().item()
@@ -226,15 +253,18 @@ class IntegerLIF:
                     self.last_stats['x_int_raw'] = x_int.detach().cpu().to(torch.float32).flatten()
             return spike, mem_int
 
+
+        # Save membrane before update (before decay, input, overflow, threshold, reset)
+        if self.collect_debug:
+            self.debug_data['memb_pre'] = mem_int.detach().clone()
+
         # Apply decay to membrane
         if self.decay is not None and self.lif_type == 'QuantizedLIF':
             if self.decay_shift is not None:
                 # Exact power-of-2 decay: arithmetic right-shift
                 # For decay=0.5, shift=1: mem = mem >> 1
                 # Only apply decay where there's input activity (matching float behavior)
-                has_input = (x_int.abs() > 0).to(torch.int64)
-                decayed = mem_int >> self.decay_shift
-                mem_int = has_input * decayed + (1 - has_input) * mem_int
+                mem_int = mem_int >> self.decay_shift
             else:
                 # Non-power-of-2 decay — approximate with multiply + shift
                 # decay ≈ D * 2^(-16) where D = round(decay * 2^16)
@@ -244,6 +274,8 @@ class IntegerLIF:
 
         # Accumulate input
         mem_int = mem_int + x_int
+
+        # (Removed memb_post: after update, before threshold/reset)
 
         # Collect membrane stats before clamping
         if self.collect_stats:
@@ -269,12 +301,21 @@ class IntegerLIF:
         # Reset: mem = mem * (1 - spike) — hard reset to 0 on spike
         mem_int = mem_int * (1 - spike.to(torch.int64))
 
+        # Capture debug data: membrane after reset (now called memb_post)
+        if self.collect_debug:
+            self.debug_data['memb_post'] = mem_int.detach().clone()
+            self.debug_data['fm_out'] = spike.detach().clone()
+
         if self.collect_stats:
             active = (x_int != 0).sum().item()
             fired = spike.sum().item()
             self.last_stats['spike_rate_pct'] = fired / max(active, 1) * 100
             self.last_stats['spike_count'] = fired
             self.last_stats['active_count'] = active
+            # Per-channel spike counts: number of '1' values in each feature map
+            # spike shape: [N, C, H, W] — use first sample only
+            self.last_stats['spike_per_channel'] = spike[0].sum(dim=(1, 2)).tolist()
+            self.last_stats['total_per_channel'] = spike.shape[2] * spike.shape[3]
 
         return spike, mem_int
 
@@ -352,6 +393,107 @@ class IntegerInferenceModel(nn.Module):
             if layer['type'] == 'spiking_conv':
                 layer['lif'].collect_stats = enabled
                 layer['lif'].collect_raw = enabled
+
+    def enable_debug(self, enabled: bool = True):
+        """Enable or disable debug capture of intermediate tensors."""
+        self._collect_debug = enabled
+        for name in self.layer_order:
+            layer = self.layers[name]
+            layer['conv'].collect_debug = enabled
+            layer['conv'].debug_data = {}
+            if layer['type'] == 'spiking_conv':
+                layer['lif'].collect_debug = enabled
+                layer['lif'].debug_data = {}
+
+    @torch.no_grad()
+    def forward_single_timestep(self, x_single: torch.Tensor,
+                                mems: Optional[Dict] = None) -> Dict:
+        """Run one timestep of integer inference and return all intermediate data.
+
+        Args:
+            x_single: float input [N, C, H, W] for one timestep
+            mems: membrane state dict (None to start fresh)
+
+        Returns:
+            dict with:
+                'layer_debug': {layer_name: {acc_raw, out, mem_after_reset, spike, ...}}
+                'flow_int': integer flow output
+                'flow_float': dequantized float flow
+                'mems': updated membrane potentials
+        """
+        if mems is None:
+            mems = {name: None for name in self.layer_order
+                    if self.layers[name]['type'] == 'spiking_conv'}
+
+        self.enable_debug(True)
+
+        xt = torch.clamp(x_single, 0, 1)
+        x_int = self._quantize_input(xt)
+
+        layer_debug = {}
+
+        def _capture(name):
+            """Capture debug data from a layer's conv and lif."""
+            layer = self.layers[name]
+            data = {}
+            # Conv debug: acc_raw (before M0*shift), out (after requant)
+            for k, v in layer['conv'].debug_data.items():
+                data[k] = v.cpu()
+            layer['conv'].debug_data = {}
+            # LIF debug: memb_post, fm_out (if present)
+            if 'lif' in layer and layer['lif'].debug_data:
+                for k, v in layer['lif'].debug_data.items():
+                    data[k] = v.cpu()
+                layer['lif'].debug_data = {}
+            layer_debug[name] = data
+
+        # --- Encoder ---
+        s1, mems['e1'] = self._run_spiking_layer('e1', x_int, mems['e1'])
+        _capture('e1')
+
+        s2, mems['e2'] = self._run_spiking_layer('e2', s1, mems['e2'])
+        _capture('e2')
+
+        s3, mems['e3'] = self._run_spiking_layer('e3', s2, mems['e3'])
+        _capture('e3')
+
+        s4, mems['e4'] = self._run_spiking_layer('e4', s3, mems['e4'])
+        _capture('e4')
+
+        # --- Decoder ---
+        d4, mems['d4'] = self._run_spiking_layer('d4', s4, mems['d4'])
+        if not self.disable_skip:
+            d4 = d4 + s4
+        _capture('d4')
+
+        d3, mems['d3'] = self._run_spiking_layer('d3', d4, mems['d3'])
+        if not self.disable_skip:
+            d3 = d3 + s3
+        _capture('d3')
+
+        d2, mems['d2'] = self._run_spiking_layer('d2', d3, mems['d2'])
+        _capture('d2')
+
+        d1 = self._integer_upsample(d2, scale_factor=2)
+        d1 = self._integer_upsample(d1, scale_factor=2)
+        s = self._integer_upsample(d1, scale_factor=2)
+
+        # Flow head
+        dflow_int = self._run_conv_layer('flow_head', s)
+        _capture('flow_head')
+
+        output_scale = self.layers['flow_head']['output_scale']
+        dflow = self._dequantize_output(dflow_int, output_scale)
+
+        self.enable_debug(False)
+
+        return {
+            'layer_debug': layer_debug,
+            'flow_int': dflow_int.cpu(),
+            'flow_float': dflow.cpu(),
+            'mems': {k: v.cpu() if v is not None else None for k, v in mems.items()},
+            'input_int': x_int.cpu(),
+        }
 
     def _get_conv_params(self, module) -> dict:
         """Extract stride, padding, groups from a QuantizedConv2d module."""
@@ -587,6 +729,8 @@ class IntegerInferenceModel(nn.Module):
 
             # d2: conv + LIF (spike_no_membrane)
             d2, mems['d2'] = self._run_spiking_layer('d2', d3, mems['d2'])
+
+            #d1, mems['d1'] = self._run_spiking_layer('d1', d2, mems['d1'])
 
             # Upsample (nearest neighbor — exact in integer domain)
             d1 = self._integer_upsample(d2, scale_factor=2)

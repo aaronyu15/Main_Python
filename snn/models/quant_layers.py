@@ -60,65 +60,6 @@ class BaseLayer(nn.Module):
                     'std': out.std().item()
                 }, self.forward_count)
     
-class QuantizedLinear(BaseLayer):
-    def __init__(
-        self,
-        in_feat: int,
-        out_feat: int,
-        bias: bool = False,
-        config: Optional[dict] = None,
-        weight_bit_width: int = None,
-        act_bit_width: int = None,
-        layer_name: str = "linear",
-    ):
-        super().__init__(config=config, weight_bit_width=weight_bit_width, act_bit_width=act_bit_width, layer_name=layer_name)
-        self.forward_count = 0
-        
-        self.lin = nn.Linear(
-            in_feat, out_feat, bias=bias
-        )
-
-        if self.quantize_weights:
-            self.weight_quant = QuantWeight(
-                bit_width=self.weight_bit_width,
-                layer_name=f"{layer_name}_weight",
-                num_channels=out_feat,  # Per-channel scales for output features
-                config=config,
-            )
-        
-        if self.quantize_activations:
-            self.act_quant = QuantAct(
-                bit_width=self.act_bit_width,
-                layer_name=f"{layer_name}_act",
-                num_channels=out_feat,  # Per-channel scales for output features
-                config=config,
-            )
-        
-        self.weights = {'linear': self.lin.weight}
-    
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.quantize_weights and self.weight_bit_width < 32:
-            weight = self.weight_quant(self.lin.weight)
-        else:
-            weight = self.lin.weight
-
-        out = F.linear(
-            input=x, 
-            weight=weight, 
-            bias=self.lin.bias,
-        )
-        
-        if self.quantize_activations and self.act_bit_width < 32:   
-            out_act = self.act_quant(out)
-        else:
-            out_act = out
-        
-        self.forward_count += 1
-
-        self.log_params(x, out_act) 
-
-        return out_act
 
 class QuantizedConv2d(BaseLayer):
     def __init__(
@@ -308,9 +249,7 @@ class QuantizedLIF(nn.Module):
             mem = torch.zeros_like(x)
 
         decay_factor = torch.tensor(self.decay, device=x.device, dtype=x.dtype)
-        x_mask = (x.abs() > 1e-2).float()
-        decay = x_mask * decay_factor + (1 - x_mask) * 1.0
-        mem = mem * decay + x
+        mem = mem * decay_factor + x
 
         spk = SurrogateSpike.apply(mem - self.threshold, self.alpha)
         mem = mem * (self.threshold - spk) 

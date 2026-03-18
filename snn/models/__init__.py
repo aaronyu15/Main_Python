@@ -4,5 +4,4 @@ from .spiking_flownet import *
 
 __all__ = [
     'EventSNNFlowNetLite',
-    'EventSNNFlowNetTeacher',
 ]

@@ -2,8 +2,7 @@
 # Newer architecture with temporal bin processing and polarity-separated inputs
 
 # Model Configuration
-#model_type: 'EventSNNFlowNetLite'   # Event-aware SNN architecture
-model_type: 'EventSNNFlowNetTeacher'   # Event-aware SNN architecture
+model_type: 'EventSNNFlowNetLite'   # Event-aware SNN architecture
 use_polarity: false                # Use separate channels for event polarities
 num_bins: 5                       # Event temporal bins - controls temporal history length
 bin_interval_us: 5000
@@ -30,28 +29,8 @@ weight_bit_width: 8
 act_bit_width: 8
 mem_bit_width: 8
 
-distillation:
-  # Alpha: Weight for distillation vs ground-truth loss
-  #   0.0 = Pure ground-truth training (no teacher)
-  #   0.5 = Balanced hybrid (recommended starting point)
-  #   1.0 = Pure distillation (student learns only from teacher)
-  alpha: 0.5
-  
-  # Temperature: Softens teacher outputs (higher = softer)
-  #   1.0 = No softening (direct matching)
-  #   > 1.0 = Softer targets (can help with hard-to-learn patterns)
-  temperature: 0.8
-  
-  # Loss type for comparing student and teacher outputs
-  #   'mse' = Mean squared error (default, good for regression)
-  #   'cosine' = Cosine similarity (focuses on flow direction)
-  #   'smooth_l1' = Huber loss (robust to outliers)
-  #   'epe' = Endpoint error (same as GT loss)
-  loss_type: 'epe'
-
-
 # Training Settings
-num_epochs: 30                  # Faster training for prototyping
+num_epochs: 50                  # Faster training for prototyping
 batch_size: 16                     # Larger batch for small model
 val_batch_size: 16
 num_workers: 12                    # Use 0 to avoid multiprocessing with h5py
@@ -63,13 +42,6 @@ lr_milestones: []
 lr_gamma: 0.5
 
 # Loss Weights
-#endpoint_weight: 0.20              # Primary EPE loss
-#angular_weight: 0.10               # Angular error loss
-#epe_ang_weight: 0.01               # Disabled - was causing spatial bias
-#smoothness_weight: 0.001           # Small smoothness regularization (now fixed)
-#vertical_weight: 0.0               # Disabled unless needed
-#effective_epe_weights: [0.2, 0.2, 0.1, 0.0, 0.0]  # Weights for effective EPE at different thresholds
-#directional_balance_weight: 1.0      # Disabled for now - can cause instability
 endpoint_weight: 0.50              # Primary EPE loss
 angular_weight: 0.50               # Angular error loss
 epe_ang_weight: 0.00               # Disabled - was causing spatial bias

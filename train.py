@@ -21,6 +21,8 @@ def parse_args():
                       help='Path to configuration file')
     parser.add_argument('--resume', type=str, default=None,
                       help='Path to checkpoint to resume from')
+    parser.add_argument('--name', type=str, default='01_base_model',
+                      help='Directory to save checkpoints')
     parser.add_argument('--checkpoint-dir', type=str, default='./checkpoints',
                       help='Directory to save checkpoints')
     parser.add_argument('--log-dir', type=str, default='./logs',
@@ -83,11 +85,13 @@ def main():
     #torch.manual_seed(seed)
     #if device == 'cuda':
     #    torch.cuda.manual_seed_all(seed)
+    checkpoint_dir = Path(args.checkpoint_dir) / args.name
+    log_dir = Path(args.log_dir) / args.name
     
     model = build_model(config, device=device, train=True)
     print(f"Built model: {config.get('model_type', 'SpikingFlowNet')}")
     
-    logger = Logger(log_dir=args.log_dir)
+    logger = Logger(log_dir=log_dir)
     model.set_logger(logger)
     
     if config.get('quantize_weights', False) or config.get('quantize_activations', False) or config.get('quantize_mem', False):
@@ -107,6 +111,7 @@ def main():
     print(f"Val data root: {val_root}")
     print(f"Train samples: {len(train_loader.dataset)}")
     print(f"Val samples: {len(val_loader.dataset)}")
+
     
     trainer = SNNTrainer(
         model=model,
@@ -114,8 +119,8 @@ def main():
         val_loader=val_loader,
         config=config,
         device=device,
-        checkpoint_dir=args.checkpoint_dir,
-        log_dir=args.log_dir,
+        checkpoint_dir=checkpoint_dir,
+        log_dir=log_dir,
         logger=logger 
     )
     

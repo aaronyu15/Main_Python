@@ -15,8 +15,9 @@ Usage:
 
     # Integer-only simulation (bit-accurate FPGA emulation)
     python evaluate.py \
-        --checkpoint checkpoints/ptq_8bit/ptq_model.pth \
+        --checkpoint checkpoints/teacher_nod1/ptq_model.pth \
         --config snn/configs/event_snn_lite_8bit.yaml \
+        --name 02_no_d1 \
         --integer-sim
 
     # Custom data root and TensorBoard log dir
@@ -54,9 +55,12 @@ def parse_args():
                       help='Path to config YAML (required for quantized models, optional for full-precision)')
     parser.add_argument('--data-root', type=str, default=None,
                       help='Root directory for dataset (overrides config)')
-    parser.add_argument('--output-dir', type=str, default='./results',
+    parser.add_argument('--output-dir', type=str, default='./logs',
                       help='Directory to save text results')
-    parser.add_argument('--log-dir', type=str, default='./logs/eval',
+    parser.add_argument('--name', type=str, default='02_no_d1',
+                      help='Directory for TensorBoard logs')
+
+    parser.add_argument('--log-dir', type=str, default='./logs',
                       help='Directory for TensorBoard logs')
     parser.add_argument('--num-samples', type=int, default=None,
                       help='Number of samples to evaluate (None = all)')
@@ -239,7 +243,7 @@ def _plot_integer_histograms(all_metrics, output_dir):
                 continue
             vals = torch.cat(data[rk], dim=0).numpy()
             fig, ax = plt.subplots(figsize=(8, 4))
-            ax.hist(vals, bins=100, color=color, edgecolor='none', alpha=0.8)
+            ax.hist(vals, bins=100, color=color, edgecolor='none', alpha=0.8, log=True)
             ax.set_title(f'{label} Distribution — {layer_name}')
             ax.set_xlabel('Value (integer)')
             ax.set_ylabel('Count')
@@ -260,7 +264,7 @@ def _plot_integer_histograms(all_metrics, output_dir):
             axes = [axes]
         for ax, (layer_name, tensors) in zip(axes, layers_with_key):
             vals = torch.cat(tensors, dim=0).numpy()
-            ax.hist(vals, bins=100, color=color, edgecolor='none', alpha=0.8)
+            ax.hist(vals, bins=100, color=color, edgecolor='none', alpha=0.8, log=True)
             ax.set_title(layer_name)
             ax.set_ylabel('Count')
             ax.axvline(0, color='gray', linestyle='--', linewidth=0.8)
@@ -393,8 +397,12 @@ def evaluate(args):
     """Main evaluation function"""
 
     # Create output directory
-    output_dir = Path(args.output_dir)
+    
+    output_dir = Path(args.output_dir) / args.name
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    log_dir = output_dir / 'eval_tensorboard_logs'
+    log_dir.mkdir(parents=True, exist_ok=True)
 
     # Set device
     device = args.device if torch.cuda.is_available() else 'cpu'
@@ -423,7 +431,7 @@ def evaluate(args):
     print(f"Evaluating on {len(dataset)} samples from {data_root}")
 
     # Setup TensorBoard logger
-    logger = Logger(log_dir=args.log_dir)
+    logger = Logger(log_dir=log_dir)
     logger.log_text('eval/checkpoint', args.checkpoint)
     logger.log_text('eval/data_root', data_root)
     logger.log_text('eval/quantized', str(is_quantized))
@@ -529,7 +537,11 @@ def evaluate(args):
                             logger.log_image(tag, hist_img, idx)
                         else:
                             tag = f'int_stats/{layer_name}/{stat_key}'
-                            logger.log_scalar(tag, float(val), idx)
+                            if isinstance(val, (list, tuple)):
+                                for ci, cv in enumerate(val):
+                                    logger.log_scalar(f'{tag}/ch{ci}', float(cv), idx)
+                            else:
+                                logger.log_scalar(tag, float(val), idx)
 
             # ---- TensorBoard visualizations ----
             # Use valid_mask (after low-activity masking) to match the trainer
@@ -631,7 +643,7 @@ def evaluate(args):
     print("="*50)
 
     # Save results to file
-    results_file = output_dir / f'results.txt'
+    results_file = output_dir / f'evaluate.txt'
     with open(results_file, 'w') as f:
         f.write("EVALUATION RESULTS\n")
         f.write("="*50 + "\n")
@@ -676,8 +688,8 @@ def evaluate(args):
         _write_integer_stats_summary(all_metrics, output_dir)
         _plot_integer_histograms(all_metrics, output_dir)
 
-    print(f"TensorBoard logs saved to {args.log_dir}")
-    print(f"  View with: tensorboard --logdir {args.log_dir}")
+    print(f"TensorBoard logs saved to {log_dir}")
+    print(f"  View with: tensorboard --logdir {log_dir}")
 
 
 

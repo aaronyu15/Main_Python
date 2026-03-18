@@ -3,8 +3,7 @@
 # Based on event_snn_lite.yaml with quantization enabled
 
 # Model Configuration
-#model_type: 'EventSNNFlowNetLite'
-model_type: 'EventSNNFlowNetTeacher'
+model_type: 'EventSNNFlowNetLite'
 use_polarity: false                 # Use separate channels for event polarities
 num_bins: 5                         # Event temporal bins
 bin_interval_us: 5000
@@ -29,10 +28,10 @@ quantize_activations: true          # Enable activation quantization
 quantize_mem: true                  # Enable membrane potential range checks
 weight_bit_width: 8                 # Weight quantization bit-width
 act_bit_width: 8                    # Activation quantization bit-width
-mem_bit_width: 8                    # Membrane potential bit-width (range check only)
+mem_bit_width: 9                    # Membrane potential bit-width (range check only)
 
 # Overflow tracking
-accum_bit_width: 12                 # Accumulator bit-width for overflow checking
+accum_bit_width: 13                 # Accumulator bit-width for overflow checking
 track_accum_overflow: true          # Track conv accumulator overflow
 track_mem_overflow: true            # Track membrane potential overflow
 multiplier_bits: 12                 # Integer multiplier M_0 bit-width for requantization
@@ -83,7 +82,7 @@ max_val_samples: null
 augment_rotation: false
 event_mask_disable_epoch: 100
 disable_skip_epoch: 25
-flip_left_to_right_prob: 0.05
+flip_left_to_right_prob: 0.00
 flip_left_threshold: -0.1
 
 # Patch-based processing
