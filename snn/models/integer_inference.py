@@ -153,10 +153,11 @@ class IntegerConv2d:
 
         # Arithmetic right-shift with rounding: add (1 << (shift-1)) before shift
         # This matches the "round-half-up" behavior typical in FPGA implementations
-        rounding = torch.where(shift > 0,
-                               torch.ones_like(shift) << (shift - 1),
-                               torch.zeros_like(shift))
-        out = (product + rounding) >> shift
+        #rounding = torch.where(shift > 0,
+        #                       torch.ones_like(shift) << (shift - 1),
+        #                       torch.zeros_like(shift))
+        #out = (product + rounding) >> shift
+        out = product >> shift
 
         if self.collect_stats:
             out_min_val = int(out.min().item())
@@ -169,7 +170,7 @@ class IntegerConv2d:
 
         # Capture product (M_0 * acc, before shift)
         if self.collect_debug:
-            self.debug_data['prod'] = product.detach().clone()
+            self.debug_data['sum_prod'] = out.detach().clone()
 
         # Handle output overflow (wrap or clamp)
         out = _overflow_handle(out, self.act_bit_width, self.overflow_mode).to(torch.int32)
@@ -265,6 +266,9 @@ class IntegerLIF:
                 # For decay=0.5, shift=1: mem = mem >> 1
                 # Only apply decay where there's input activity (matching float behavior)
                 mem_int = mem_int >> self.decay_shift
+                #has_input = (x_int.abs() > 0).to(torch.int64)
+                #decayed = mem_int >> self.decay_shift
+                #mem_int = has_input * decayed + (1 - has_input) * mem_int
             else:
                 # Non-power-of-2 decay — approximate with multiply + shift
                 # decay ≈ D * 2^(-16) where D = round(decay * 2^16)

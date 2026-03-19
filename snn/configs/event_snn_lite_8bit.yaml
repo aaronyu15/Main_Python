@@ -44,12 +44,6 @@ num_calib_batches: 26996             # Number of batches for PTQ calibration
 weight_scale_type: 'per_channel'    # Weight scale granularity
 act_scale_type: 'per_layer'         # Activation scale granularity
 
-# Distillation Settings (inherits from base if training with distillation)
-distillation:
-  alpha: 0.5
-  temperature: 0.8
-  loss_type: 'epe'
-
 # Training Settings - Fine-tuning (fewer epochs, lower LR)
 num_epochs: 30
 batch_size: 16

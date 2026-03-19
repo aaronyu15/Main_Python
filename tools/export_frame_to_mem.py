@@ -22,7 +22,7 @@ Example (with integer inference debug):
     python tools/export_frame_to_mem.py \
         --config snn/configs/event_snn_lite_8bit.yaml \
         --checkpoint checkpoints/ptq_8bit/ptq_model.pth \
-        --frame-idx 0 --timestep 0 \
+        --frame-idx 0 \
         --output output/debug_export/frame.mem
 """
 
@@ -90,15 +90,17 @@ def write_feature_map_mem(path: Path, tensor: torch.Tensor, name: str,
     if tensor.dim() == 4:
         tensor = tensor[0]  # take sample 0: [C, H, W]
     C, H, W = tensor.shape
+    lines = []
+    for c in range(C):
+        for y in range(H):
+            for x in range(W):
+                val = tensor[c, y, x].item()
+                if as_float:
+                    lines.append(f"ch={c}, x={x}, y={y}, v={val:.6f}")
+                else:
+                    lines.append(f"ch={c}, x={x}, y={y}, v={int(val)}")
     with open(path, 'w') as f:
-        for c in range(C):
-            for y in range(H):
-                for x in range(W):
-                    val = tensor[c, y, x].item()
-                    if as_float:
-                        f.write(f"ch={c}, x={x}, y={y}, v={val:.6f}\n")
-                    else:
-                        f.write(f"ch={c}, x={x}, y={y}, v={int(val)}\n")
+        f.write('\n'.join(lines))
 
 
 def export_debug_data(debug_result: dict, output_dir: Path):
@@ -120,9 +122,9 @@ def export_debug_data(debug_result: dict, output_dir: Path):
             write_feature_map_mem(layer_dir / 'sum.mem',
                                   data['sum'], f'{layer_name}/sum')
 
-        if 'prod' in data:
-            write_feature_map_mem(layer_dir / 'prod.mem',
-                                  data['prod'], f'{layer_name}/prod')
+        if 'sum_prod' in data:
+            write_feature_map_mem(layer_dir / 'sum_prod.mem',
+                                  data['sum_prod'], f'{layer_name}/sum_prod')
 
 
         if 'fm_out' in data:
@@ -148,7 +150,7 @@ def export_debug_data(debug_result: dict, output_dir: Path):
     print(f"\nDebug data exported to {output_dir}/")
     print(f"  input_int.mem")
     for layer_name, data in layer_debug.items():
-        files = [k for k in ['sum', 'prod', 'spike', 'memb_pre', 'memb_post'] if k in data]
+        files = [k for k in ['sum', 'sum_prod', 'spike', 'memb_pre', 'memb_post'] if k in data]
         shapes = []
         for k in files:
             t = data[k]
@@ -159,10 +161,9 @@ def export_debug_data(debug_result: dict, output_dir: Path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Export frame timestep to .mem file")
+    parser = argparse.ArgumentParser(description="Export frame to .mem file")
     parser.add_argument("--config", required=True, help="Path to config YAML")
     parser.add_argument("--frame-idx", type=int, default=0, help="Frame index in dataset")
-    parser.add_argument("--timestep", type=int, default=0, help="Timestep index (0 to num_bins-1)")
     parser.add_argument("--output", default="frame.mem", help="Output .mem file path")
     parser.add_argument("--checkpoint", default=None,
                         help="Path to trained model checkpoint for integer inference debug")
@@ -181,15 +182,10 @@ def main():
     # Load frame
     sample = dataset[args.frame_idx]
     input_tensor = sample['input']  # [num_bins, 2, H, W]
-
     num_bins = input_tensor.shape[0]
-    if args.timestep >= num_bins:
-        print(f"Error: timestep {args.timestep} >= num_bins {num_bins}")
-        sys.exit(1)
 
-    # Extract single timestep and polarity channel
-    frame = input_tensor[args.timestep, 0].numpy()  # [H, W]
-
+    # For legacy output: export the first timestep as the main .mem file
+    frame = input_tensor[0, 0].numpy()  # [H, W]
     H, W = frame.shape
     print(f"Frame shape: {H}x{W}")
     print(f"Non-zero pixels: {np.count_nonzero(frame)}")
@@ -269,11 +265,10 @@ def main():
                 result_t['flow_int'][0],    # [2, H', W']
             ))
 
-            # Export debug data only for the requested timestep
-            if t == args.timestep:
-                print(f"Input shape (timestep {t}): {list(x_t.shape)}")
-                debug_dir = output_path.parent / 'debug'
-                export_debug_data(result_t, debug_dir)
+            # Export debug data for every timestep into subfolders
+            print(f"Input shape (timestep {t}): {list(x_t.shape)}")
+            debug_dir = output_path.parent / str(t)
+            export_debug_data(result_t, debug_dir)
 
         print(f"Ran inference for all {num_bins} timesteps")
 
@@ -290,7 +285,7 @@ def main():
         axes = [axes]
 
     im0 = axes[0].imshow(frame, cmap='hot', aspect='equal')
-    axes[0].set_title(f'Event counts\n(frame {args.frame_idx}, t={args.timestep})')
+    axes[0].set_title(f'Event counts\n(frame {args.frame_idx})')
     axes[0].set_xlabel('x')
     axes[0].set_ylabel('y')
     plt.colorbar(im0, ax=axes[0], label='count', fraction=0.046)
