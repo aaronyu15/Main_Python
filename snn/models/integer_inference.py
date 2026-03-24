@@ -723,13 +723,9 @@ class IntegerInferenceModel(nn.Module):
             # --- Decoder ---
             # d4: conv + LIF
             d4, mems['d4'] = self._run_spiking_layer('d4', s4, mems['d4'])
-            if not self.disable_skip:
-                d4 = d4 + s4  # Skip connection (integer add of spikes)
 
             # d3: conv + LIF
             d3, mems['d3'] = self._run_spiking_layer('d3', d4, mems['d3'])
-            if not self.disable_skip:
-                d3 = d3 + s3
 
             # d2: conv + LIF (spike_no_membrane)
             d2, mems['d2'] = self._run_spiking_layer('d2', d3, mems['d2'])

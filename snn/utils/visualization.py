@@ -162,7 +162,7 @@ def visualize_flow(flow: torch.Tensor, max_flow: Optional[float] = None) -> np.n
 
 
 
-def visualize_events(event_voxel: np.ndarray, brightness_scale: float = 0.7) -> np.ndarray:
+def visualize_events(event_voxel: np.ndarray, brightness_scale: float = 0.5) -> np.ndarray:
     """
     Visualize event voxel grid as RGB image (red=positive, blue=negative events)
     

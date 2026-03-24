@@ -574,30 +574,34 @@ class SNNTrainer:
             self.epoch = epoch
 
             self.update_settings(epoch)
-            
+
             # Train
             train_metrics = self.train_epoch()
-            
+
             # Validate
             val_metrics = self.validate()
-            
+
             # Learning rate scheduling
             self.scheduler.step()
-            
+
             # Log epoch metrics
             print(f"\nEpoch {epoch} Summary:")
             print(f"  Train - Loss: {train_metrics['total_loss']:.4f}, AngEPE: {train_metrics['epe_ang_loss']:.4f}, EPE: {train_metrics['endpoint_loss']:.4f}, Ang: {train_metrics['angular_loss']:.4f}, Outliers: {train_metrics['outliers']:.2f}%%")
             print(f"  Val   - Loss: {val_metrics['total_loss']:.4f}, AngEPE: {val_metrics['epe_ang_loss']:.4f}, EPE: {val_metrics['endpoint_loss']:.4f}, Ang: {val_metrics['angular_loss']:.4f}, Outliers: {val_metrics['outliers']:.2f}%")
             print(f"  Val EPE (Effective) - All: {val_metrics['endpoint_loss']:.4f}, Flow>0.1: {val_metrics['epe_effective']:.4f}")
-            
+
             for key, value in train_metrics.items():
                 self.logger.log_scalar(f'epoch/train_{key}', value, epoch)
             for key, value in val_metrics.items():
                 self.logger.log_scalar(f'epoch/val_{key}', value, epoch)
-            
+
             # Save checkpoint
             if epoch % self.config.get('save_interval', 10) == 0:
                 self.save_checkpoint(f'checkpoint_epoch_{epoch}.pth')
+
+            # Explicitly clear CUDA cache to help prevent memory accumulation
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             
             # Save best model
             if val_metrics['epe_ang_loss'] < self.best_val_epe:

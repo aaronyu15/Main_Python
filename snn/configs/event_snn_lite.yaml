@@ -4,9 +4,9 @@
 # Model Configuration
 model_type: 'EventSNNFlowNetLite'   # Event-aware SNN architecture
 use_polarity: false                # Use separate channels for event polarities
-num_bins: 5                       # Event temporal bins - controls temporal history length
+num_bins: 5                      # Event temporal bins - controls temporal history length
 bin_interval_us: 5000
-base_ch: 8                     # Base number of channels in encoder
+base_ch: 8                    # Base number of channels in encoder
 
 enable_logging_params: false                    # Log model parameters and statistics to TensorBoard
 
@@ -74,7 +74,7 @@ flow_clip_range: null
 
 # Training Loop Settings
 grad_clip: 1.0
-log_interval: 10
+log_interval: 1000
 save_interval: 5
-image_log_interval: 100
+image_log_interval: 10000
 

@@ -1,0 +1,39 @@
+e1:
+  Word 0: 0x00000245 | [reserved(21) | in_c=1 | out_c=8 | stride=2 | snn=1]
+  Word 1: 0x28008000 | [reserved(2) | dim=320 | num_weight_addr=8 | weight_addr=0]
+  Word 2: 0x00000000 | [reserved(8) | num_mem_addr=0 | mem_addr=0]
+
+e2:
+  Word 0: 0x00001045 | [reserved(21) | in_c=8 | out_c=8 | stride=2 | snn=1]
+  Word 1: 0x14040008 | [reserved(2) | dim=160 | num_weight_addr=64 | weight_addr=8]
+  Word 2: 0x00000000 | [reserved(8) | num_mem_addr=0 | mem_addr=0]
+
+e3:
+  Word 0: 0x00001085 | [reserved(21) | in_c=8 | out_c=16 | stride=2 | snn=1]
+  Word 1: 0x0A080048 | [reserved(2) | dim=80 | num_weight_addr=128 | weight_addr=72]
+  Word 2: 0x01900000 | [reserved(8) | num_mem_addr=1600 | mem_addr=0]
+
+e4:
+  Word 0: 0x00002083 | [reserved(21) | in_c=16 | out_c=16 | stride=1 | snn=1]
+  Word 1: 0x051000C8 | [reserved(2) | dim=40 | num_weight_addr=256 | weight_addr=200]
+  Word 2: 0x01900640 | [reserved(8) | num_mem_addr=1600 | mem_addr=1600]
+
+d4:
+  Word 0: 0x00002083 | [reserved(21) | in_c=16 | out_c=16 | stride=1 | snn=1]
+  Word 1: 0x051001C8 | [reserved(2) | dim=40 | num_weight_addr=256 | weight_addr=456]
+  Word 2: 0x01900C80 | [reserved(8) | num_mem_addr=1600 | mem_addr=3200]
+
+d3:
+  Word 0: 0x00002083 | [reserved(21) | in_c=16 | out_c=16 | stride=1 | snn=1]
+  Word 1: 0x051002C8 | [reserved(2) | dim=40 | num_weight_addr=256 | weight_addr=712]
+  Word 2: 0x019012C0 | [reserved(8) | num_mem_addr=1600 | mem_addr=4800]
+
+d2:
+  Word 0: 0x00002043 | [reserved(21) | in_c=16 | out_c=8 | stride=1 | snn=1]
+  Word 1: 0x050803C8 | [reserved(2) | dim=40 | num_weight_addr=128 | weight_addr=968]
+  Word 2: 0x01901900 | [reserved(8) | num_mem_addr=1600 | mem_addr=6400]
+
+flow_head:
+  Word 0: 0x00001012 | [reserved(21) | in_c=8 | out_c=2 | stride=1 | snn=0]
+  Word 1: 0x28010448 | [reserved(2) | dim=320 | num_weight_addr=16 | weight_addr=1096]
+  Word 2: 0x00000000 | [reserved(8) | num_mem_addr=0 | mem_addr=0]

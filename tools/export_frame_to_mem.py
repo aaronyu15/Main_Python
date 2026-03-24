@@ -194,7 +194,7 @@ def main():
     mem_lines = frame_to_mem_lines(frame)
 
     # Write output (no header)
-    output_path = Path(args.output)
+    output_path = Path(f"{Path(args.output).parent}_{args.frame_idx}") / Path(args.output).name
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, 'w') as f:
         for line in mem_lines:

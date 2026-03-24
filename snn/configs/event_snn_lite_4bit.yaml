@@ -44,14 +44,14 @@ distillation:
   loss_type: 'epe'
 
 # Training Settings - Fine-tuning (more epochs for aggressive quantization)
-num_epochs: 15
+num_epochs: 30
 batch_size: 16
 val_batch_size: 16
 num_workers: 12
 
 # Optimizer Settings - Lower learning rate for 4-bit
-learning_rate: 0.00005              # Lower for 4-bit stability
-weight_decay: 0.0005
+learning_rate: 0.0001              # Lower for 4-bit stability
+weight_decay: 0.001
 lr_milestones: []
 lr_gamma: 0.5
 
@@ -75,7 +75,7 @@ max_val_samples: null
 augment_rotation: false
 event_mask_disable_epoch: 100
 disable_skip_epoch: 25
-flip_left_to_right_prob: 0.05
+flip_left_to_right_prob: 0.00
 flip_left_threshold: -0.1
 
 # Patch-based processing

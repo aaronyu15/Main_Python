@@ -10,15 +10,15 @@ Example usage:
 
   # Quantized (PTQ) model:
   python visualize_predictions_csv.py \
-      --checkpoint ../checkpoints/teacher_10000u_8bin/best_model.pth \
+      --checkpoint ../checkpoints/02_no_d1/best_model.pth \
       --config ../snn/configs/event_snn_lite_8bit.yaml \
-      --csv-file ../data/events.csv
+      --csv-file ../../blink_sim/output/real/events.csv
 
   # Integer-only inference (FPGA simulation):
   python visualize_predictions_csv.py \
-      --checkpoint ../checkpoints/teacher_10000u_8bin/best_model.pth \
+      --checkpoint ../checkpoints/02_no_d1/ptq_model.pth \
       --config ../snn/configs/event_snn_lite_8bit.yaml \
-      --integer-sim --csv-file ../data/events.csv
+      --integer-sim --csv-file ../../blink_sim/output/real/events.csv
 """
 
 import argparse
@@ -107,7 +107,7 @@ def events_to_voxel_grid(
                     pol_idx = 0 if p[i] > 0 else 1  
                 else:
                     pol_idx = 0 
-                voxel_grid[bin_idx, pol_idx, y[i], x[i]] += 1.0
+                voxel_grid[bin_idx, pol_idx, y[i], x[i]] = 1.0
         
     return torch.from_numpy(voxel_grid)
 
@@ -231,11 +231,19 @@ def create_flow_animation_from_csv(
         
         # Run inference
         flow_pred = run_inference(model, voxel_grid, device)
+
+        # Count unique events (unique x, y, polarity)
+        if len(window_events) > 0:
+            unique_events = np.unique(window_events[:, [0, 1, 3]], axis=0)
+            num_unique_events = unique_events.shape[0]
+        else:
+            num_unique_events = 0
         
         frames_data.append({
             'voxel_grid': voxel_grid.cpu().numpy(),
             'flow_pred': flow_pred.cpu().numpy(),
             'num_events': len(window_events),
+            'num_unique_events': num_unique_events,
             't_start_ms': t_start / 1000.0,
             't_end_ms': t_end / 1000.0
         })
@@ -244,15 +252,17 @@ def create_flow_animation_from_csv(
 
     # Precompute event counts for a static histogram view
     event_counts = [f['num_events'] for f in frames_data]
-
+    unique_event_counts = [f['num_unique_events'] for f in frames_data]
 
     # Save histogram separately to avoid slowing GIF rendering
     hist_save_path = Path(save_path).with_name(Path(save_path).stem + '_events_hist.png')
     plt.figure(figsize=(10, 3))
-    plt.bar(range(len(event_counts)), event_counts, color='gray', alpha=0.8)
+    plt.bar(range(len(event_counts)), event_counts, color='gray', alpha=0.6, label='Total events')
+    plt.bar(range(len(unique_event_counts)), unique_event_counts, color='blue', alpha=0.6, label='Unique events')
     plt.xlabel('Frame')
     plt.ylabel('Event count')
     plt.title('Events per Frame')
+    plt.legend()
     plt.tight_layout()
     plt.savefig(hist_save_path, dpi=150)
     plt.close()
@@ -279,7 +289,7 @@ def create_flow_animation_from_csv(
         event_rgb = visualize_events(voxel_grid)
         h, w = event_rgb.shape[:2]
         axes[0].imshow(event_rgb)
-        axes[0].set_title(f'Events ({frame_data["num_events"]} events)')
+        axes[0].set_title(f'Events ({frame_data["num_events"]} total, {frame_data["num_unique_events"]} unique)')
         axes[0].axis('off')
         
         # Predicted flow
