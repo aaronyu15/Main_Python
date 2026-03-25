@@ -4,9 +4,9 @@
 # Model Configuration
 model_type: 'EventSNNFlowNetLite'   # Event-aware SNN architecture
 use_polarity: false                # Use separate channels for event polarities
-num_bins: 5                      # Event temporal bins - controls temporal history length
+num_bins: 5                     # Event temporal bins - controls temporal history length
 bin_interval_us: 5000
-base_ch: 8                    # Base number of channels in encoder
+base_ch: 8                   # Base number of channels in encoder
 
 enable_logging_params: false                    # Log model parameters and statistics to TensorBoard
 
@@ -33,7 +33,7 @@ mem_bit_width: 8
 num_epochs: 50                  # Faster training for prototyping
 batch_size: 16                     # Larger batch for small model
 val_batch_size: 16
-num_workers: 12                    # Use 0 to avoid multiprocessing with h5py
+num_workers: 16                    # Use 0 to avoid multiprocessing with h5py
 
 # Optimizer Settings
 learning_rate: 0.0005              # Higher LR for faster convergence
