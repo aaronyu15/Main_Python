@@ -36,7 +36,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from snn.models import EventSNNFlowNetLite
-from snn.dataset import OpticalFlowDataset
+# from snn.dataset import OpticalFlowDataset
+from comparisons.dsec.dsec_dataset import DSECOpticalFlowDataset as OpticalFlowDataset
 from snn.training import endpoint_error, calculate_outliers, angular_error, epe_weighted_angular_error
 from snn.utils.logger import Logger
 from snn.utils.visualization import visualize_flow
@@ -64,7 +65,7 @@ def parse_args():
                       help='Directory for TensorBoard logs')
     parser.add_argument('--num-samples', type=int, default=None,
                       help='Number of samples to evaluate (None = all)')
-    parser.add_argument('--log-interval', type=int, default=10,
+    parser.add_argument('--log-interval', type=int, default=2,
                       help='Log TensorBoard images every N batches')
     parser.add_argument('--max-images', type=int, default=4,
                       help='Max images per visualization grid')
@@ -315,7 +316,14 @@ def _write_integer_stats_summary(all_metrics, output_dir):
                     prev.append(val)
                     global_worst[layer_name][key] = prev
                 else:
-                    global_worst[layer_name][key] = max(global_worst[layer_name].get(key, 0), val)
+                    if isinstance(val, (list, tuple)):
+                        prev = global_worst[layer_name].get(key, [])
+                        if not isinstance(prev, list):
+                            prev = [prev]
+                        prev.extend(val if isinstance(val, list) else list(val))
+                        global_worst[layer_name][key] = prev
+                    else:
+                        global_worst[layer_name][key] = max(global_worst[layer_name].get(key, 0), val)
 
     # Average the pct lists
     for layer_stats in global_worst.values():
@@ -412,8 +420,7 @@ def evaluate(args):
     model, config, is_quantized = build_eval_model(args, device)
 
     # Build dataset
-    data_root = args.data_root or config.get('val_data_root',
-                    config.get('data_root', '../blink_sim/output/test_set'))
+    data_root = args.data_root #or config.get('val_data_root', config.get('data_root', '../blink_sim/output/test_set'))
     dataset_config = config.copy()
     dataset_config['data_root'] = data_root
     dataset_config['max_train_samples'] = args.num_samples

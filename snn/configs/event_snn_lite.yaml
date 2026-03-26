@@ -4,7 +4,7 @@
 # Model Configuration
 model_type: 'EventSNNFlowNetLite'   # Event-aware SNN architecture
 use_polarity: false                # Use separate channels for event polarities
-num_bins: 5                     # Event temporal bins - controls temporal history length
+num_bins: 10                     # Event temporal bins - controls temporal history length
 bin_interval_us: 5000
 base_ch: 8                   # Base number of channels in encoder
 
