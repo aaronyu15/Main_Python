@@ -94,7 +94,7 @@ def gather_layers(
 
     for name, module in layers_config:
         in_c, out_c, k, s, p, g = extract_conv_params(module)
-        snn_layer = module.__class__.__name__.startswith("Spiking")
+
 
         # flow_head receives upsampled input (back to full resolution)
         if name == "flow_head":
@@ -109,8 +109,13 @@ def gather_layers(
         weight_addr = align_up(weight_ptr, weight_align)
         weight_ptr = weight_addr + num_weight_addr
 
+        if name == "e3" or name == "e4" or name == "d4" or name == "d3":
+            snn_layer = True 
+        else:            
+            snn_layer = False
+
         # Membrane allocation
-        if name == "e1" or name == "e2":
+        if name == "e1" or name == "e2" or name == "d2":
             # No membrane for spike_no_membrane layers
             num_mem_addr = 0
             mem_addr = 0
@@ -142,45 +147,37 @@ def gather_layers(
     return infos
 
 
-def pack_instruction(info: LayerInfo) -> List[int]:
+def pack_instruction(info: LayerInfo, fm_source: int) -> List[int]:
     """
-    Pack layer info into 3 32-bit instruction words (little endian):
-    - Word 0: [reserved(21) | in_c(6) | out_c(6) | stride(2) | snn(1)]
-    - Word 1: [reserved(2) | dim(9) | num_weight_addr(9) | weight_addr(12)]
-    - Word 2: [reserved(8) | num_mem_addr(12) | mem_addr(14)]
-    Returns list of 3 ints.
+    Pack layer info into 2 32-bit instruction words (little endian):
+    - Word 0 (instr_word1_t): [reserved(11) | dim(9) | in_c(6) | out_c(6) | stride(2) | fm_source(1) | snn(1)]
+    - Word 1 (instr_word2_t): [num_weight_addr(9) | weight_addr(12) | mem_addr(14)]
+    Returns list of 2 ints.
     """
-    # Word 0: bits 31:11 reserved, 10:7 in_c, 6:3 out_c, 2:1 stride, 0 snn
     word0 = (
-        ((info.in_c & 0x3F) << 9) |      # bits 10:7
-        ((info.out_c & 0x3F) << 3) |     # bits 6:3
-        ((info.stride & 0x3) << 1) |    # bits 2:1
-        ((int(info.snn) & 0x1) << 0)    # bit 0
-        # reserved upper bits (31:11) are 0
+        ((0)                        << 25) |  # reserved [35:25], always 0
+        ((info.dim & 0x1FF)         << 16) |  # dim      [24:16]
+        ((info.in_c & 0x3F)         << 10) |  # in_c     [15:10]
+        ((info.out_c & 0x3F)        <<  4) |  # out_c    [9:4]
+        ((info.stride & 0x3)        <<  2) |  # stride   [3:2]
+        ((fm_source & 0x1)          <<  1) |  # fm_source[1]
+        ((int(info.snn) & 0x1)      <<  0)    # snn      [0]
     )
-    # Word 1: bits 31:30 reserved, 29:21 dim, 20:12 num_weight_addr, 11:0 weight_addr
+
     word1 = (
-        ((info.dim & 0x1FF) << 21) |             # bits 29:21
-        ((info.num_weight_addr & 0x1FF) << 12) | # bits 20:12
-        ((info.weight_addr & 0xFFF) << 0)        # bits 11:0
-        # reserved upper bits (31:30) are 0
+        ((info.num_weight_addr & 0x1FF) << 26) |  # num_weight_addr [34:26]
+        ((info.weight_addr & 0xFFF)     << 14) |  # weight_addr     [25:14]
+        ((info.mem_addr & 0x3FFF)       <<  0)    # mem_addr        [13:0]
     )
-    # Word 2: bits 31:24 reserved, 23:12 num_mem_addr, 11:0 mem_addr
-    word2 = (
-        ((info.num_mem_addr & 0xFFF) << 14) |    # bits 23:12
-        ((info.mem_addr & 0x3FFF) << 0)           # bits 11:0
-        # reserved upper bits (31:24) are 0
-    )
-    return [word0, word1, word2]
+    return [word0, word1]
 
 
-def format_instruction_text(info: LayerInfo, words: List[int]) -> List[str]:
+def format_instruction_text(info: LayerInfo, words: List[int], fm_source: int) -> List[str]:
     """Return human-readable lines for each instruction word."""
     lines = [
         f"{info.name}:",
-        f"  Word 0: 0x{words[0]:08X} | [reserved(21) | in_c={info.in_c} | out_c={info.out_c} | stride={info.stride} | snn={int(info.snn)}]",
-        f"  Word 1: 0x{words[1]:08X} | [reserved(2) | dim={info.dim} | num_weight_addr={info.num_weight_addr} | weight_addr={info.weight_addr}]",
-        f"  Word 2: 0x{words[2]:08X} | [reserved(8) | num_mem_addr={info.num_mem_addr} | mem_addr={info.mem_addr}]",
+        f"  Word 0: 0x{words[0]:08X} | [reserved(11) | dim={info.dim} | in_c={info.in_c} | out_c={info.out_c} | stride={info.stride} | fm_source={fm_source} | snn={int(info.snn)}]",
+        f"  Word 1: 0x{words[1]:08X} | [num_weight_addr={info.num_weight_addr} | weight_addr={info.weight_addr} | mem_addr={info.mem_addr}]",
         ""
     ]
     return lines
@@ -248,14 +245,17 @@ def main() -> None:
         mem_pack=args.mem_pack,
     )
 
+    # Assign fm_source: 0 for first and last, 1 for others
+    fm_sources = [0] + [1] * (len(layers) - 2) + [0]
+
     # Generate .mem and .txt
     mem_lines: List[str] = []
     txt_lines: List[str] = []
-    for info in layers:
-        words = pack_instruction(info)
+    for info, fm_source in zip(layers, fm_sources):
+        words = pack_instruction(info, fm_source)
         for w in words:
             mem_lines.append(f"{w:08X}")
-        txt_lines.extend(format_instruction_text(info, words))
+        txt_lines.extend(format_instruction_text(info, words, fm_source))
 
     out_path = pathlib.Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)

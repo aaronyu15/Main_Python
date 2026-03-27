@@ -196,37 +196,35 @@ class SNNTrainer:
             
             fig, axes = plt.subplots(1, 2, figsize=(12, 4))
             
-            try:
-                # U component histogram
-                axes[0].hist(u_valid.detach().numpy(), bins=50, range=(min_val, max_val), 
-                            alpha=0.7, color='blue', edgecolor='black')
-                axes[0].set_xlabel('U Flow (horizontal)')
-                axes[0].set_ylabel('Frequency')
-                axes[0].set_title(f'U Component Distribution\nMin: {u_valid.min():.2f}, Max: {u_valid.max():.2f}, Mean: {u_valid.mean():.2f}')
-                axes[0].grid(True, alpha=0.3)
-                axes[0].set_xlim(min_val, max_val)
-                axes[0].set_yscale('log')  # Use log scale for better visibility of distribution tails
+            # U component histogram
+            axes[0].hist(u_valid.detach().numpy(), bins=50, range=(min_val, max_val), 
+                        alpha=0.7, color='blue', edgecolor='black')
+            axes[0].set_xlabel('U Flow (horizontal)')
+            axes[0].set_ylabel('Frequency')
+            axes[0].set_title(f'U Component Distribution\nMin: {u_valid.min():.2f}, Max: {u_valid.max():.2f}, Mean: {u_valid.mean():.2f}')
+            axes[0].grid(True, alpha=0.3)
+            axes[0].set_xlim(min_val, max_val)
+            axes[0].set_yscale('log')  # Use log scale for better visibility of distribution tails
             
-                # V component histogram
-                axes[1].hist(v_valid.detach().numpy(), bins=50, range=(min_val, max_val),
-                            alpha=0.7, color='green', edgecolor='black')
-                axes[1].set_xlabel('V Flow (vertical)')
-                axes[1].set_ylabel('Frequency')
-                axes[1].set_title(f'V Component Distribution\nMin: {v_valid.min():.2f}, Max: {v_valid.max():.2f}, Mean: {v_valid.mean():.2f}')
-                axes[1].grid(True, alpha=0.3)
-                axes[1].set_xlim(min_val, max_val)
-                axes[1].set_yscale('log')  # Use log scale for better visibility of distribution tails
+            # V component histogram
+            axes[1].hist(v_valid.detach().numpy(), bins=50, range=(min_val, max_val),
+                        alpha=0.7, color='green', edgecolor='black')
+            axes[1].set_xlabel('V Flow (vertical)')
+            axes[1].set_ylabel('Frequency')
+            axes[1].set_title(f'V Component Distribution\nMin: {v_valid.min():.2f}, Max: {v_valid.max():.2f}, Mean: {v_valid.mean():.2f}')
+            axes[1].grid(True, alpha=0.3)
+            axes[1].set_xlim(min_val, max_val)
+            axes[1].set_yscale('log')  # Use log scale for better visibility of distribution tails
             
-                plt.tight_layout()
+            plt.tight_layout()
             
-                # Convert figure to image tensor
-                buf = io.BytesIO()
-                plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
-                buf.seek(0)
-                img = Image.open(buf)
-                img_array = np.array(img)
-            finally:
-                plt.close(fig)
+            # Convert figure to image tensor
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+            buf.seek(0)
+            img = Image.open(buf)
+            img_array = np.array(img)
+            plt.close(fig)
             
             # Convert to torch tensor [C, H, W] in range [0, 1]
             img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).float() / 255.0
@@ -295,7 +293,7 @@ class SNNTrainer:
                 dir_ang = angular_error(flow_pred, gt_flow, valid_mask, mode="directional")
             
             for key in epoch_losses:
-                epoch_losses[key] += losses[key].item()
+                epoch_losses[key] += losses[key]
             epoch_outliers += outliers            
             epoch_flow_max += flow_max
             epoch_flow_avg += flow_avg
@@ -433,7 +431,7 @@ class SNNTrainer:
             dir_ang = angular_error(flow_pred, gt_flow, valid_mask, mode="directional")
             
             for key in val_losses:
-                val_losses[key] += losses[key].item()
+                val_losses[key] += losses[key]
             val_outliers += outliers
 
             val_epe_effective += epe_effective
@@ -449,10 +447,10 @@ class SNNTrainer:
             # Store first batch for visualization
             if batch_idx == 0:
                 first_batch_vis = {
-                    'inputs': inputs.cpu(),
-                    'gt_flow': gt_flow.cpu(),
-                    'valid_mask': valid_mask.cpu(),
-                    'pred_flow': outputs['flow'].cpu()
+                    'inputs': inputs,
+                    'gt_flow': gt_flow,
+                    'valid_mask': valid_mask,
+                    'pred_flow': outputs['flow']
                 }
         
         # Average
@@ -469,10 +467,10 @@ class SNNTrainer:
         # Log validation images
         if first_batch_vis is not None:
             visualizations = self._visualize_batch(
-                first_batch_vis['inputs'].cpu(),
-                first_batch_vis['gt_flow'].cpu(),
-                first_batch_vis['valid_mask'].cpu(),
-                pred_flow=first_batch_vis['pred_flow'].cpu(),
+                first_batch_vis['inputs'],
+                first_batch_vis['gt_flow'],
+                first_batch_vis['valid_mask'],
+                pred_flow=first_batch_vis['pred_flow'],
                 max_images=self.config.get('max_images_log', 4)
             )
             
@@ -488,8 +486,8 @@ class SNNTrainer:
             
             # Log flow histograms (u and v components with same scale)
             self._log_flow_histograms(
-                first_batch_vis['pred_flow'].cpu(), 
-                first_batch_vis['valid_mask'].cpu(), 
+                first_batch_vis['pred_flow'], 
+                first_batch_vis['valid_mask'], 
                 'val', 
                 'pred',
                 self.global_step

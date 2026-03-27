@@ -94,27 +94,30 @@ class OpticalFlowDataset(Dataset):
     
     def _build_sample_list(self) -> List[Dict]:
         samples = []
-        
+
         for seq_dir in self.sequences:
             flow_dir = seq_dir / 'forward_flow'
-            flow_files = sorted(flow_dir.glob('*.npy'))
-            
+            flow_h5_file = flow_dir / 'flow_gt.h5'
+
+            if flow_h5_file.exists():
+                with h5py.File(flow_h5_file, 'r') as f:
+                    num_frames = f['flow'].shape[0]
+
             if self.use_events:
                 event_dir = seq_dir / 'events_left'
-                
                 event_h5_file = event_dir / 'events.h5'
                 if event_h5_file.exists():
-                    num_frames = len(flow_files)
-                    for flow_file in flow_files:
-                        frame_idx = int(flow_file.stem)
-                        samples.append({
+                    for frame_idx in range(num_frames):
+                        sample = {
                             'sequence': seq_dir.name,
-                            'flow_path': flow_file,
                             'event_h5_path': event_h5_file,
+                            'flow_h5_path': flow_h5_file,
                             'index': frame_idx,
-                            'num_frames': num_frames
-                        })
-        
+                            'num_frames': num_frames,
+                        }
+
+                        samples.append(sample)
+
         return samples
     
     def __len__(self) -> int:
@@ -132,15 +135,16 @@ class OpticalFlowDataset(Dataset):
                 - 'metadata': Dictionary with sequence info
         """
         sample_info = self.samples[idx]
+        frame_idx = sample_info['index']
         
         # Load optical flow
-        flow_data = np.load(sample_info['flow_path'])  # [H, W, 2] or [H, W, 3]
+        with h5py.File(sample_info['flow_h5_path'], 'r') as f:
+            flow_data = f['flow'][frame_idx]  # [H, W, 3]
         
         # Format: [u, v, valid] - extract flow and validity
         flow = torch.from_numpy(flow_data[:, :, :2]).permute(2, 0, 1).float()  # [2, H, W]
         valid_mask = torch.from_numpy(flow_data[:, :, 2:3]).permute(2, 0, 1).float()  # [1, H, W]
         
-        frame_idx = sample_info['index']
 
         try:
             with h5py.File(sample_info['event_h5_path'], 'r') as f:
