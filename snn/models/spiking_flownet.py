@@ -137,6 +137,9 @@ class EventSNNFlowNetLite(nn.Module):
             layer_name="flow_head",
         )
 
+        #self.skip_proj_1 = nn.Conv2d(self.base_ch, self.base_ch * 2, kernel_size=1, stride=1, padding=0)
+        #self.skip_proj_2 = nn.Conv2d(self.base_ch, self.base_ch * 2, kernel_size=1, stride=1, padding=0)
+
     def set_logger(self, logger):
         self.logger = logger
         for module in self.modules():
@@ -187,6 +190,22 @@ class EventSNNFlowNetLite(nn.Module):
 
             s = F.interpolate(d1, scale_factor=2, mode="nearest")
             dflow = self.flow_head(s)
+            #######################################################
+
+            ## incr_upscale d4, mem_d4 = self.d4(s4, mem_d4)
+            ## incr_upscale d4 = d4 + s3 if self.disable_skip is False else d4
+
+            ## incr_upscale d3 = F.interpolate(d4, scale_factor=2, mode="nearest")
+            ## incr_upscale d3 = d3 + self.skip_proj_2(s2) if self.disable_skip is False else d3
+            ## incr_upscale d3, mem_d3 = self.d3(d3, mem_d3)
+
+            ## incr_upscale d2 = F.interpolate(d3, scale_factor=2, mode="nearest")
+            ## incr_upscale d2 = d2 + self.skip_proj_1(s1) if self.disable_skip is False else d2
+            ## incr_upscale d2, mem_d2 = self.d2(d2, mem_d2)
+
+            ## incr_upscale d1 = F.interpolate(d2, scale_factor=2, mode="nearest")
+            ## incr_upscale d1 = d1 + xt if self.disable_skip is False else d1
+            ## incr_upscale dflow = self.flow_head(d1)
 
             if flow_acc is None:
                 flow_acc = dflow

@@ -4,8 +4,8 @@
 # Model Configuration
 model_type: 'EventSNNFlowNetLite'   # Event-aware SNN architecture
 use_polarity: false                # Use separate channels for event polarities
-num_bins: 5                     # Event temporal bins - controls temporal history length
-bin_interval_us: 8000
+num_bins: 5                    # Event temporal bins - controls temporal history length
+bin_interval_us: 10000
 base_ch: 8                   # Base number of channels in encoder
 
 enable_logging_params: false                    # Log model parameters and statistics to TensorBoard
@@ -31,9 +31,9 @@ mem_bit_width: 8
 
 # Training Settings
 num_epochs: 50                  # Faster training for prototyping
-batch_size: 16                     # Larger batch for small model
-val_batch_size: 16
-num_workers: 16                    # Use 0 to avoid multiprocessing with h5py
+batch_size: 8                     # Larger batch for small model
+val_batch_size: 8
+num_workers: 8                    # Use 0 to avoid multiprocessing with h5py
 
 # Optimizer Settings
 learning_rate: 0.0005              # Higher LR for faster convergence
@@ -52,8 +52,10 @@ directional_balance_weight: 0.00     # Disabled for now - can cause instability
 epe_type: 'epe'                      # Use logarithmic EPE for loss calculation
 
 # Data Settings
-data_root: '../blink_sim/output/train_set' # Path to dataset root directory
-val_data_root: '../blink_sim/output/valid_set' # Path to dataset root directory
+#data_root: '../blink_sim/output/train_set' # Path to dataset root directory
+#val_data_root: '../blink_sim/output/valid_set' # Path to dataset root directory
+data_root: '../mvsec/' # Path to dataset root directory
+#val_data_root: '../blink_sim/output/valid_set' # Path to dataset root directory
 camera_size: [320, 320]
 use_events: true
 max_train_samples: null             # Limit for fast prototyping
@@ -76,5 +78,5 @@ flow_clip_range: null
 grad_clip: 1.0
 log_interval: 1000
 save_interval: 5
-image_log_interval: 10000
+image_log_interval: 10
 

@@ -6,7 +6,8 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 
 from snn.models import EventSNNFlowNetLite
-from snn.dataset import OpticalFlowDataset
+#from snn.dataset import OpticalFlowDataset
+from comparisons.mvsec.mvsec_dataset import MVSECDataset as OpticalFlowDataset
 from snn.training import SNNTrainer
 from snn.utils.logger import Logger
 import random
@@ -41,14 +42,32 @@ def build_dataloaders(config: dict, train_root: str = None, val_root: str = None
     train_root = train_root or config.get('data_root', '../blink_sim/output/train_set')
     val_root = val_root or config.get('val_data_root', '../blink_sim/output/valid_set')
 
-    # Train dataset
+    #regular Train dataset
+    #regular train_config = config.copy()
+    #regular train_config['data_root'] = train_root
+    #regular train_dataset = OpticalFlowDataset(config=train_config)
+
+    #regular Val dataset
+    #regular val_config = config.copy()
+    #regular val_config['data_root'] = val_root
+    #regular val_dataset = OpticalFlowDataset(config=val_config)
+
+    # MVSEC Train dataset
     train_config = config.copy()
+    train_config['dt'] = 1
     train_config['data_root'] = train_root
+    train_config['sequences'] = ['outdoor_day2']
+    train_config['filter'] = {'outdoor_day2': (0, 3474)}
+    train_config['crop_size'] = {256, 344}
     train_dataset = OpticalFlowDataset(config=train_config)
 
-    # Val dataset
+    # MVSEC Val dataset
     val_config = config.copy()
-    val_config['data_root'] = val_root
+    val_config['dt'] = 1
+    val_config['data_root'] = train_root
+    val_config['sequences'] = ['outdoor_day2']
+    val_config['filter'] = {'outdoor_day2': (3474, 4343)}
+    val_config['crop_size'] = {256, 344}
     val_dataset = OpticalFlowDataset(config=val_config)
     
     train_loader = DataLoader(
