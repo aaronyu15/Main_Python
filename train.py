@@ -7,7 +7,8 @@ from torch.utils.data import DataLoader
 
 from snn.models import EventSNNFlowNetLite
 #from snn.dataset import OpticalFlowDataset
-from comparisons.mvsec.mvsec_dataset import MVSECDataset as OpticalFlowDataset
+#from comparisons.mvsec.mvsec_dataset import MVSECDataset as OpticalFlowDataset
+from comparisons.dsec.dsec_dataset import DSECOpticalFlowDataset as OpticalFlowDataset
 from snn.training import SNNTrainer
 from snn.utils.logger import Logger
 import random
@@ -52,22 +53,32 @@ def build_dataloaders(config: dict, train_root: str = None, val_root: str = None
     #regular val_config['data_root'] = val_root
     #regular val_dataset = OpticalFlowDataset(config=val_config)
 
-    # MVSEC Train dataset
+    #KEEP for MVSEC # MVSEC Train dataset
+    #KEEP for MVSEC train_config = config.copy()
+    #KEEP for MVSEC train_config['dt'] = 1
+    #KEEP for MVSEC train_config['data_root'] = train_root
+    #KEEP for MVSEC train_config['sequences'] = ['outdoor_day2']
+    #KEEP for MVSEC train_config['filter'] = {'outdoor_day2': (0, 3474)}
+    #KEEP for MVSEC train_config['crop_size'] = (256, 344)
+    #KEEP for MVSEC train_dataset = OpticalFlowDataset(config=train_config)
+
+    #KEEP for MVSEC # MVSEC Val dataset
+    #KEEP for MVSEC val_config = config.copy()
+    #KEEP for MVSEC val_config['dt'] = 1
+    #KEEP for MVSEC val_config['data_root'] = train_root
+    #KEEP for MVSEC val_config['sequences'] = ['outdoor_day2']
+    #KEEP for MVSEC val_config['filter'] = {'outdoor_day2': (3474, 4343)}
+    #KEEP for MVSEC val_config['crop_size'] = (256, 344)
+    #KEEP for MVSEC val_dataset = OpticalFlowDataset(config=val_config)
+
+    # DSEC dataset
     train_config = config.copy()
-    train_config['dt'] = 1
     train_config['data_root'] = train_root
-    train_config['sequences'] = ['outdoor_day2']
-    train_config['filter'] = {'outdoor_day2': (0, 3474)}
-    train_config['crop_size'] = {256, 344}
     train_dataset = OpticalFlowDataset(config=train_config)
 
-    # MVSEC Val dataset
+    # Val dataset
     val_config = config.copy()
-    val_config['dt'] = 1
-    val_config['data_root'] = train_root
-    val_config['sequences'] = ['outdoor_day2']
-    val_config['filter'] = {'outdoor_day2': (3474, 4343)}
-    val_config['crop_size'] = {256, 344}
+    val_config['data_root'] = val_root
     val_dataset = OpticalFlowDataset(config=val_config)
     
     train_loader = DataLoader(

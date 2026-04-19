@@ -37,7 +37,8 @@ from tqdm import tqdm
 
 from snn.models import EventSNNFlowNetLite
 # from snn.dataset import OpticalFlowDataset
-from comparisons.dsec.dsec_dataset import DSECOpticalFlowDataset as OpticalFlowDataset
+#from comparisons.dsec.dsec_dataset import DSECOpticalFlowDataset as OpticalFlowDataset
+from comparisons.mvsec.mvsec_dataset import MVSECDataset as OpticalFlowDataset
 from snn.training import endpoint_error, calculate_outliers, angular_error, epe_weighted_angular_error
 from snn.utils.logger import Logger
 from snn.utils.visualization import visualize_flow
@@ -424,8 +425,12 @@ def evaluate(args):
     dataset_config = config.copy()
     dataset_config['data_root'] = data_root
     dataset_config['max_train_samples'] = args.num_samples
-    dataset_config['flip_left_to_right_prob'] = 0.0
 
+    # MVSEC Train dataset
+    dataset_config['dt'] = 1
+    dataset_config['sequences'] = ['outdoor_day1']
+    dataset_config['crop_size'] = (256, 344)
+    dataset_dataset = OpticalFlowDataset(config=dataset_config)
     dataset = OpticalFlowDataset(config=dataset_config)
 
     dataloader = DataLoader(

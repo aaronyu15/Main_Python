@@ -58,8 +58,19 @@ CONFIG="snn/configs/event_snn_lite.yaml"
 #python train.py --config snn/configs/event_snn_lite.yaml --name "${NAME}_3"
 #python train.py --config snn/configs/event_snn_lite.yaml --name "${NAME}_4"
 
-NAME="10_mvsec_5bin_10ms_dt1"
-python train.py --config snn/configs/event_snn_lite.yaml --name "${NAME}_1"
-python train.py --config snn/configs/event_snn_lite.yaml --name "${NAME}_2"
-python train.py --config snn/configs/event_snn_lite.yaml --name "${NAME}_3"
-python train.py --config snn/configs/event_snn_lite.yaml --name "${NAME}_4"
+#NAME="10_mvsec"
+#sed -i 's/num_bins: [0-9]\+/num_bins: 5/g' $CONFIG
+#sed -i 's/bin_interval_us: [0-9]\+/bin_interval_us: 5000/g' $CONFIG
+#python train.py --config snn/configs/event_snn_lite_mvsec.yaml --name "${NAME}_2"
+#python train.py --config snn/configs/event_snn_lite_mvsec.yaml --name "${NAME}_3"
+#
+#NAME="10_mvsec_5bin_10ms_dt1"
+#sed -i 's/bin_interval_us: [0-9]\+/bin_interval_us: 10000/g' $CONFIG
+#python train.py --config snn/configs/event_snn_lite_mvsec.yaml --name "${NAME}_1"
+#python train.py --config snn/configs/event_snn_lite_mvsec.yaml --name "${NAME}_2"
+#python train.py --config snn/configs/event_snn_lite_mvsec.yaml --name "${NAME}_3"
+
+NAME="11_dsec_5bin_20ms"
+python train.py --config snn/configs/event_snn_lite_dsec.yaml --name "${NAME}_1"
+python train.py --config snn/configs/event_snn_lite_dsec.yaml --name "${NAME}_2"
+python train.py --config snn/configs/event_snn_lite_dsec.yaml --name "${NAME}_3"

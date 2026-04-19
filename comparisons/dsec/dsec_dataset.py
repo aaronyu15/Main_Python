@@ -2,22 +2,17 @@
 DSEC Optical Flow Dataset Loader
 Drop-in replacement for OpticalFlowDataset that loads from the DSEC dataset structure.
 
-DSEC directory structure:
-    dsec_root/
+DSEC flat directory structure:
+    dsec_root/            (e.g. dsec/train/ or dsec/test/)
         sequence_name/
-            events/
-                left/
-                    events.h5        (contains events/x, events/y, events/t, events/p)
-                    rectify_map.h5   (contains rectify_map [H, W, 2] for undistortion)
-            flow/
-                forward/
-                    000002.png, 000004.png, ...   (16-bit PNG, channels: u, v, valid)
-                forward_timestamps.txt            (from_ts, to_ts per line)
+            events.h5                                       (events/x, events/y, events/t, events/p)
+            rectify_map.h5                                  (rectify_map [H, W, 2])
+            <seq>_optical_flow_forward_timestamps.txt        (train: from_ts, to_ts)
+            <seq>.csv                                       (test:  from_ts, to_ts, file_index)
+            000134.png, 000136.png, ...                     (train only: 16-bit PNG flow GT)
 
-Usage with evaluate.py:
-    Replace the dataset import:
-        from comparisons.dsec.dsec_dataset import DSECOpticalFlowDataset as OpticalFlowDataset
-    Or pass --dsec-root and let evaluate.py pick it up.
+Train split:  has flow PNGs + timestamps .txt    -> supervised training / evaluation
+Test split:   has CSV + no flow PNGs             -> inference only (flow & valid_mask are zeros)
 
 Flow PNG encoding (DSEC spec):
     Channel 0 (R) = horizontal flow u, uint16, flow_u = (value - 2^15) / 128.0
@@ -70,9 +65,13 @@ class DSECOpticalFlowDataset(Dataset):
         # Build sample list
         self.samples = self._build_sample_list()
 
-        # Per-sequence caches
-        self._ts_cache: Dict[str, np.ndarray] = {}
+        # Whether this split has ground-truth flow
+        self.has_flow = len(self.samples) > 0 and self.samples[0]['flow_path'] is not None
+
+        # Per-sequence caches (lightweight — only ms_to_idx + t_offset + rectify)
+        self._seq_cache: Dict[str, Dict] = {}
         self._rectify_cache: Dict[str, np.ndarray] = {}
+        self._preload_sequences()
 
     # ------------------------------------------------------------------
     # Sample discovery
@@ -84,46 +83,75 @@ class DSECOpticalFlowDataset(Dataset):
         for seq_dir in sorted(root.iterdir()):
             if not seq_dir.is_dir():
                 continue
+            seq_name = seq_dir.name
 
-            # Locate events file -- handle both flat and nested layouts
-            event_h5 = self._find_event_h5(seq_dir)
-            if event_h5 is None:
+            # Locate events.h5 (flat layout)
+            event_h5 = seq_dir / 'events.h5'
+            if not event_h5.exists():
                 continue
 
-            # Locate rectification map (same directory as events.h5, or seq root)
-            rectify_h5 = self._find_rectify_map(seq_dir)
+            # Locate rectification map
+            rectify_h5 = seq_dir / 'rectify_map.h5'
+            if not rectify_h5.exists():
+                rectify_h5 = None
 
-            # Locate flow directory and timestamps
-            flow_dir = seq_dir / 'flow' / 'forward'
-            ts_file = seq_dir / 'flow' / 'forward_timestamps.txt'
-            if not flow_dir.exists() or not ts_file.exists():
+            # Determine split type: train has *_timestamps.txt, test has <seq>.csv
+            ts_file = seq_dir / f'{seq_name}_optical_flow_forward_timestamps.txt'
+            csv_file = seq_dir / f'{seq_name}.csv'
+
+            if ts_file.exists():
+                # ---- Train split: timestamps + flow PNGs ----
+                flow_pngs = sorted(seq_dir.glob('*.png'))
+
+                with open(ts_file, 'r') as f:
+                    lines = [l.strip() for l in f if l.strip() and not l.startswith('#')]
+
+                if len(lines) != len(flow_pngs):
+                    print(f"WARNING: {seq_name}: {len(lines)} timestamp lines "
+                          f"vs {len(flow_pngs)} PNGs — skipping")
+                    continue
+
+                for i, (line, png_path) in enumerate(zip(lines, flow_pngs)):
+                    parts = line.split(',')
+                    if len(parts) < 2:
+                        continue
+                    from_ts, to_ts = int(parts[0].strip()), int(parts[1].strip())
+                    samples.append({
+                        'sequence': seq_name,
+                        'flow_path': png_path,
+                        'event_h5_path': event_h5,
+                        'rectify_h5_path': rectify_h5,
+                        'from_ts': from_ts,
+                        'to_ts': to_ts,
+                        'index': i,
+                        'file_index': -1,
+                    })
+
+            elif csv_file.exists():
+                # ---- Test split: CSV with file_index, no flow PNGs ----
+                with open(csv_file, 'r') as f:
+                    lines = [l.strip() for l in f if l.strip() and not l.startswith('#')]
+
+                for i, line in enumerate(lines):
+                    parts = line.split(',')
+                    if len(parts) < 3:
+                        continue
+                    from_ts = int(parts[0].strip())
+                    to_ts = int(parts[1].strip())
+                    file_index = int(parts[2].strip())
+                    samples.append({
+                        'sequence': seq_name,
+                        'flow_path': None,
+                        'event_h5_path': event_h5,
+                        'rectify_h5_path': rectify_h5,
+                        'from_ts': from_ts,
+                        'to_ts': to_ts,
+                        'index': i,
+                        'file_index': file_index,
+                    })
+            else:
+                # No timestamp/csv file — skip sequence
                 continue
-
-            # Parse timestamp file
-            with open(ts_file, 'r') as f:
-                lines = [l.strip() for l in f if l.strip() and not l.startswith('#')]
-
-            for i, line in enumerate(lines):
-                parts = line.split(',')
-                if len(parts) < 2:
-                    continue
-                from_ts, to_ts = int(parts[0]), int(parts[1])
-
-                # DSEC names flow PNGs with 6-digit zero-padded numbers.
-                # Try common conventions: index-based and even-numbered.
-                flow_file = self._find_flow_png(flow_dir, i)
-                if flow_file is None:
-                    continue
-
-                samples.append({
-                    'sequence': seq_dir.name,
-                    'flow_path': flow_file,
-                    'event_h5_path': event_h5,
-                    'rectify_h5_path': rectify_h5,
-                    'from_ts': from_ts,
-                    'to_ts': to_ts,
-                    'index': i,
-                })
 
         # Optionally limit number of samples
         if self.max_samples is not None and self.max_samples < len(samples):
@@ -131,67 +159,84 @@ class DSECOpticalFlowDataset(Dataset):
 
         return samples
 
-    @staticmethod
-    def _find_event_h5(seq_dir: Path) -> Optional[Path]:
-        """Search for events.h5 in common DSEC layouts."""
-        candidates = [
-            seq_dir / 'events' / 'left' / 'events.h5',
-            seq_dir / 'events.h5',
-        ]
-        for c in candidates:
-            if c.exists():
-                return c
-        return None
-
-    @staticmethod
-    def _find_rectify_map(seq_dir: Path) -> Optional[Path]:
-        """Search for rectify_map.h5 in common DSEC layouts."""
-        candidates = [
-            seq_dir / 'events' / 'left' / 'rectify_map.h5',
-            seq_dir / 'rectify_map.h5',
-        ]
-        for c in candidates:
-            if c.exists():
-                return c
-        return None
-
-    @staticmethod
-    def _find_flow_png(flow_dir: Path, index: int) -> Optional[Path]:
-        """Try common DSEC flow PNG naming conventions."""
-        candidates = [
-            flow_dir / f'{index * 2 + 2:06d}.png',   # even-numbered (official DSEC)
-            flow_dir / f'{index:06d}.png',            # zero-indexed
-        ]
-        for c in candidates:
-            if c.exists():
-                return c
-        return None
-
     # ------------------------------------------------------------------
-    # Per-sequence caching
+    # Per-sequence caching (lightweight — mirrors MVSEC approach)
     # ------------------------------------------------------------------
-    def _get_timestamps(self, h5_path: Path) -> np.ndarray:
+    def _preload_sequences(self):
+        """Cache only the tiny ms_to_idx + t_offset per sequence.
+
+        DSEC events.h5 contains a ``ms_to_idx`` dataset that maps each
+        millisecond offset from the recording start to the corresponding
+        event index.  This is only ~100 KB per sequence (vs. tens of GB
+        for the full timestamp array).
+
+        In __getitem__ we use ms_to_idx for a coarse bracket, read a
+        small HDF5 slice, then do a fine binary search — identical to the
+        strategy used in the MVSEC loader.
         """
-        Return the full timestamp array for a sequence, cached across calls.
-        Adds the t_offset stored in the HDF5 so that event timestamps are in
-        the same absolute reference frame as the flow timestamps.
-        """
-        key = str(h5_path)
-        if key not in self._ts_cache:
-            with h5py.File(h5_path, 'r') as f:
-                t = f['events/t'][:].astype(np.int64)
-                # DSEC stores event timestamps as offsets from 0.
-                # t_offset converts them to the absolute frame used by
-                # forward_timestamps.txt.
+        seen: set = set()
+        for s in self.samples:
+            key = str(s['event_h5_path'])
+            if key in seen:
+                continue
+            seen.add(key)
+
+            with h5py.File(s['event_h5_path'], 'r') as f:
+                ms_to_idx = f['ms_to_idx'][:].astype(np.int64)
                 if 't_offset' in f:
                     t_offset = int(f['t_offset'][()])
                 elif 'events/t_offset' in f:
                     t_offset = int(f['events/t_offset'][()])
                 else:
                     t_offset = 0
-                t += t_offset
-                self._ts_cache[key] = t
-        return self._ts_cache[key]
+                num_events = f['events/t'].shape[0]
+
+            self._seq_cache[key] = {
+                'ms_to_idx': ms_to_idx,
+                't_offset': t_offset,
+                'num_events': num_events,
+            }
+
+        total_kb = sum(c['ms_to_idx'].nbytes for c in self._seq_cache.values()) / 1024
+        print(f"DSECOpticalFlowDataset: cached ms_to_idx for "
+              f"{len(self._seq_cache)} sequence(s) ({total_kb:.0f} KB total)")
+
+    def _find_event_range(self, h5_path: Path, t0_us: int, t1_us: int) -> Tuple[int, int]:
+        """Two-step event lookup using ms_to_idx (coarse) + HDF5 slice (fine).
+
+        Args:
+            h5_path: Path to the events.h5 file.
+            t0_us, t1_us: Absolute timestamps in microseconds defining the
+                event window [t0_us, t1_us).
+
+        Returns:
+            (start_idx, end_idx) into the events arrays.
+        """
+        cache = self._seq_cache[str(h5_path)]
+        ms_to_idx = cache['ms_to_idx']
+        t_offset = cache['t_offset']
+        num_events = cache['num_events']
+
+        # Convert absolute timestamps to raw (relative to recording start)
+        t0_raw = t0_us - t_offset
+        t1_raw = t1_us - t_offset
+
+        # Convert to millisecond indices (with 1 ms margin)
+        ms0 = max(0, int(t0_raw // 1000) - 1)
+        ms1 = min(len(ms_to_idx) - 1, int(t1_raw // 1000) + 1)
+
+        coarse_start = int(ms_to_idx[ms0])
+        coarse_end = int(ms_to_idx[ms1]) if ms1 < len(ms_to_idx) else num_events
+
+        # Fine search: read only the timestamps in the coarse range
+        with h5py.File(h5_path, 'r') as f:
+            chunk_t = f['events/t'][coarse_start:coarse_end].astype(np.int64)
+
+        # Binary search within the chunk (raw timestamps, microseconds)
+        fine_start = np.searchsorted(chunk_t, t0_raw, side='left')
+        fine_end = np.searchsorted(chunk_t, t1_raw, side='right')
+
+        return coarse_start + fine_start, coarse_start + fine_end
 
     def _get_rectify_map(self, h5_path: Optional[Path]) -> Optional[np.ndarray]:
         """
@@ -218,32 +263,37 @@ class DSECOpticalFlowDataset(Dataset):
         sample = self.samples[idx]
 
         # ---- Load flow ground truth from 16-bit PNG ----
-        # cv2 with IMREAD_UNCHANGED reliably reads uint16 3-channel PNGs.
-        # PNG stores RGB; OpenCV returns BGR, so channel indices are swapped:
-        #   file channel 0 (u)     -> cv2 channel 2
-        #   file channel 1 (v)     -> cv2 channel 1
-        #   file channel 2 (valid) -> cv2 channel 0
-        flow_png = cv2.imread(str(sample['flow_path']), cv2.IMREAD_UNCHANGED)
-        if flow_png is None:
-            raise FileNotFoundError(f"Could not read flow PNG: {sample['flow_path']}")
+        if sample['flow_path'] is not None:
+            # cv2 with IMREAD_UNCHANGED reliably reads uint16 3-channel PNGs.
+            # PNG stores RGB; OpenCV returns BGR, so channel indices are swapped:
+            #   file channel 0 (u)     -> cv2 channel 2
+            #   file channel 1 (v)     -> cv2 channel 1
+            #   file channel 2 (valid) -> cv2 channel 0
+            flow_png = cv2.imread(str(sample['flow_path']), cv2.IMREAD_UNCHANGED)
+            if flow_png is None:
+                raise FileNotFoundError(f"Could not read flow PNG: {sample['flow_path']}")
 
-        flow_u = (flow_png[:, :, 2].astype(np.float32) - 2**15) / 128.0
-        flow_v = (flow_png[:, :, 1].astype(np.float32) - 2**15) / 128.0
-        valid  = (flow_png[:, :, 0] > 0).astype(np.float32)
+            flow_u = (flow_png[:, :, 2].astype(np.float32) - 2**15) / 128.0
+            flow_v = (flow_png[:, :, 1].astype(np.float32) - 2**15) / 128.0
+            valid  = (flow_png[:, :, 0] > 0).astype(np.float32)
 
-        flow = np.stack([flow_u, flow_v], axis=0)       # [2, H, W]
-        valid_mask = valid[np.newaxis, :, :]             # [1, H, W]
+            flow = np.stack([flow_u, flow_v], axis=0)       # [2, H, W]
+            valid_mask = valid[np.newaxis, :, :]             # [1, H, W]
+        else:
+            # Test split: no GT flow available
+            flow = np.zeros((2, self.dsec_height, self.dsec_width), dtype=np.float32)
+            valid_mask = np.zeros((1, self.dsec_height, self.dsec_width), dtype=np.float32)
 
         # ---- Load events for this time window ----
         # Match the training dataset's windowing: anchor at to_ts, look back
         # by num_bins * bin_interval_us so the voxel grid temporal coverage is
         # identical to what the model was trained on.
-        all_t = self._get_timestamps(sample['event_h5_path'])
         time_window_us = self.num_bins * self.bin_interval_us
         t1 = sample['to_ts']
         t0 = t1 - time_window_us
-        start_idx = np.searchsorted(all_t, t0, side='left')
-        end_idx   = np.searchsorted(all_t, t1, side='left')
+
+        # Two-step lookup: coarse bracket via ms_to_idx, fine via HDF5 slice
+        start_idx, end_idx = self._find_event_range(sample['event_h5_path'], t0, t1)
 
         with h5py.File(sample['event_h5_path'], 'r') as f:
             x = f['events/x'][start_idx:end_idx].astype(np.int32)
@@ -288,6 +338,7 @@ class DSECOpticalFlowDataset(Dataset):
             'metadata': {
                 'sequence': sample['sequence'],
                 'index': sample['index'],
+                'file_index': sample['file_index'],
             }
         }
 
@@ -415,27 +466,22 @@ if __name__ == '__main__':
 
     # ---- Timestamp diagnostics ----
     s = ds.samples[idx]
-    all_t = ds._get_timestamps(s['event_h5_path'])
     time_window = ds.num_bins * ds.bin_interval_us
     t1 = s['to_ts']
     t0 = t1 - time_window
-    start_idx = np.searchsorted(all_t, t0, side='left')
-    end_idx = np.searchsorted(all_t, t1, side='left')
+    start_idx, end_idx = ds._find_event_range(s['event_h5_path'], t0, t1)
 
+    cache = ds._seq_cache[str(s['event_h5_path'])]
     print(f"\n  --- Timestamp diagnostics ---")
-    with h5py.File(s['event_h5_path'], 'r') as _f:
-        _raw_t0, _raw_t1 = int(_f['events/t'][0]), int(_f['events/t'][-1])
-        _off = int(_f['t_offset'][()]) if 't_offset' in _f else (
-               int(_f['events/t_offset'][()]) if 'events/t_offset' in _f else 0)
-    print(f"  Raw event t    : [{_raw_t0}, {_raw_t1}]")
-    print(f"  t_offset       : {_off}")
-    print(f"  Shifted t range: [{all_t[0]}, {all_t[-1]}]")
+    print(f"  t_offset       : {cache['t_offset']}")
+    print(f"  num_events     : {cache['num_events']}")
+    print(f"  ms_to_idx len  : {len(cache['ms_to_idx'])}")
     print(f"  from_ts, to_ts : {s['from_ts']}, {s['to_ts']}")
     print(f"  to_ts - from_ts: {s['to_ts'] - s['from_ts']}")
     print(f"  bin_interval_us: {ds.bin_interval_us}")
     print(f"  time_window    : {time_window}  (num_bins={ds.num_bins} x bin_interval={ds.bin_interval_us})")
     print(f"  Computed [t0,t1]: [{t0}, {t1}]")
-    print(f"  searchsorted   : start_idx={start_idx}, end_idx={end_idx}, n_events={end_idx - start_idx}")
+    print(f"  event range    : start_idx={start_idx}, end_idx={end_idx}, n_events={end_idx - start_idx}")
     print(f"  Rectify map    : {s['rectify_h5_path'] or 'NOT FOUND'}")
     print()
 
@@ -448,12 +494,14 @@ if __name__ == '__main__':
 
     print(f"  Sequence : {meta['sequence']}")
     print(f"  Index    : {meta['index']}")
+    print(f"  file_idx : {meta['file_index']}")
     print(f"  Input    : {inp.shape}  (T={inp.shape[0]}, C={inp.shape[1]})")
     print(f"  Flow     : {flow.shape}  u=[{flow[0].min():.2f}, {flow[0].max():.2f}]  "
           f"v=[{flow[1].min():.2f}, {flow[1].max():.2f}]")
     print(f"  Valid    : {valid.shape}  ({valid.sum().long().item()} valid pixels)")
     print(f"  Events   : min={inp.min():.0f}  max={inp.max():.0f}  "
           f"total={inp.sum():.0f}")
+    print(f"  has_flow : {ds.has_flow}")
 
     # ---- Helper: flow -> RGB (HSV wheel) ----
     def flow_to_rgb(flow_np, mask=None):
@@ -474,8 +522,10 @@ if __name__ == '__main__':
 
     # ---- Build figure ----
     n_bins = inp.shape[0]
-    n_cols = n_bins + 2                       # bins + GT flow + valid mask
-    fig, axes = plt.subplots(1, n_cols, figsize=(3.2 * n_cols, 3.5))
+    n_cols = n_bins + (2 if ds.has_flow else 0)  # bins + (GT flow + valid mask) if train
+    fig, axes = plt.subplots(1, max(n_cols, 1), figsize=(3.2 * max(n_cols, 1), 3.5))
+    if n_cols == 1:
+        axes = [axes]
 
     # Per-bin event images
     for b in range(n_bins):
@@ -485,18 +535,19 @@ if __name__ == '__main__':
         ax.set_title(f'Bin {b}', fontsize=9)
         ax.axis('off')
 
-    # GT flow
-    ax_flow = axes[n_bins]
-    flow_hw2 = flow.permute(1, 2, 0).numpy()  # [H, W, 2]
-    ax_flow.imshow(flow_to_rgb(flow_hw2, mask=valid[0].numpy()))
-    ax_flow.set_title('GT Flow', fontsize=9)
-    ax_flow.axis('off')
+    if ds.has_flow:
+        # GT flow
+        ax_flow = axes[n_bins]
+        flow_hw2 = flow.permute(1, 2, 0).numpy()  # [H, W, 2]
+        ax_flow.imshow(flow_to_rgb(flow_hw2, mask=valid[0].numpy()))
+        ax_flow.set_title('GT Flow', fontsize=9)
+        ax_flow.axis('off')
 
-    # Valid mask
-    ax_mask = axes[n_bins + 1]
-    ax_mask.imshow(valid[0].numpy(), cmap='Greys', vmin=0, vmax=1)
-    ax_mask.set_title('Valid Mask', fontsize=9)
-    ax_mask.axis('off')
+        # Valid mask
+        ax_mask = axes[n_bins + 1]
+        ax_mask.imshow(valid[0].numpy(), cmap='Greys', vmin=0, vmax=1)
+        ax_mask.set_title('Valid Mask', fontsize=9)
+        ax_mask.axis('off')
 
     fig.suptitle(f"{meta['sequence']}  idx={meta['index']}  "
                  f"(sample {idx}/{len(ds)})", fontsize=11)
